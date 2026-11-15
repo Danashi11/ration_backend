@@ -16,10 +16,11 @@
     </p>
   </div>
   <div class="head-actions">
-    {% if user.is_manager and not project.is_locked %}<a href="{% url 'project_edit' project.pk %}" class="btn btn-quiet">Edit project</a>{% endif %}
-    <a href="#project-status" class="btn btn-quiet">{% if project.is_locked %}History{% else %}Status{% endif %}</a>
+    {% if user.is_manager and project.is_editable %}<a href="{% url 'project_edit' project.pk %}" class="btn btn-quiet">Edit project</a>{% endif %}
   </div>
 </div>
+
+{% include "core/_status_bar.html" %}
 
 {% if project.is_locked %}
   {% if final %}
@@ -28,6 +29,11 @@
   <div class="notice notice-warning" role="status">This project is completed, but no saved costs were found for it.</div>
   {% endif %}
 {% else %}
+  {% if project.status == 'pending' %}
+  <div class="notice notice-warning" role="status">
+    Waiting for an accountant to approve this project. {% if user.is_manager %}Only material prices can change now. To edit anything else, use Back to draft above.{% elif user.can_approve_projects %}Approve it above, or <a href="#project-status">decline it with a comment</a>.{% endif %}
+  </div>
+  {% endif %}
 
 {# ---------- Project total ---------- #}
 <section class="project-total" aria-labelledby="project-total">
@@ -40,7 +46,7 @@
   </p>
   {% elif estimate.unchosen %}
   <div class="notice notice-warning" role="status">
-    {% if user.is_manager %}Choose a mix for {% for block in estimate.unchosen %}the {{ block.quantity }} {{ block.get_block_type_display|lower }} blocks{% if not forloop.last %} and {% endif %}{% endfor %} to see the project total. Each mix below shows its price.
+    {% if user.is_manager and project.is_editable %}Choose a mix for {% for block in estimate.unchosen %}the {{ block.quantity }} {{ block.get_block_type_display|lower }} blocks{% if not forloop.last %} and {% endif %}{% endfor %} to see the project total. Each mix below shows its price.
     {% else %}The project total appears once a manager chooses a mix for every block type.{% endif %}
   </div>
   {% elif estimate.mixed_currencies %}
@@ -59,7 +65,7 @@
       <span class="total-line-what">{{ item.block.quantity }} {{ item.block.get_block_type_display|lower }} blocks</span>
       <span class="total-line-mix">
         {% if item.selected %}{{ item.selected.mix.name }}
-        {% elif user.is_manager %}<a href="#block-{{ item.block.pk }}">Choose a mix</a>
+        {% elif user.is_manager and project.is_editable %}<a href="#block-{{ item.block.pk }}">Choose a mix</a>
         {% else %}<span class="muted">No mix chosen yet</span>{% endif %}
       </span>
       <span class="total-line-cost">{% if item.selected.total is not None %}{{ item.selected.total|money:item.selected.currency }}{% else %}<span class="muted">—</span>{% endif %}</span>
@@ -78,7 +84,7 @@
     </div>
   </div>
 
-  <div class="{% if user.is_manager %}split{% endif %}">
+  <div class="{% if price_form %}split{% endif %}">
     <div>
       {% if material_rows %}
       <div class="table-wrap">
@@ -107,7 +113,7 @@
       {% endif %}
     </div>
 
-    {% if user.is_manager %}
+    {% if price_form %}
     <form method="post" action="{% url 'project_price_add' project.pk %}" class="subform" novalidate>
       {% csrf_token %}
       <h3>Set a price for this project</h3>
@@ -117,7 +123,7 @@
         {% include "core/_field.html" with field=price_form.currency %}
       </div>
       {% include "core/_field.html" with field=price_form.price_unit %}
-      <div class="field"><button type="submit" class="btn btn-small" data-busy-label="Sending…">Send for approval</button></div>
+      <div class="field"><button type="submit" class="btn btn-small" data-busy-label="Sending…">Send price for approval</button></div>
     </form>
     {% endif %}
   </div>
@@ -171,7 +177,7 @@
   </p>
   {% elif item.options %}
   <p class="answer">
-    {% if user.is_manager %}Choose a mix for these blocks.{% else %}No mix chosen yet.{% endif %}
+    {% if user.is_manager and project.is_editable %}Choose a mix for these blocks.{% else %}No mix chosen yet.{% endif %}
     {% if item.best %}<br><span class="answer-note">Cheapest: {{ item.best.mix.name }} at {{ item.best.total|money:item.best.currency }}.</span>{% endif %}
   </p>
   {% endif %}
@@ -198,7 +204,7 @@
             {% if option.cheapest %}<span class="flag flag-quiet">Cheapest</span>{% endif %}
             {% if option.below_strength %}<span class="flag flag-weak">Weaker than required</span>{% endif %}
           </div>
-          {% if user.is_manager and not option.selected %}
+          {% if user.is_manager and project.is_editable and not option.selected %}
           <form method="post" action="{% url 'project_choose_mix' project.pk item.block.pk %}" class="choose">
             {% csrf_token %}
             <button type="submit" name="mix" value="{{ option.mix.pk }}" class="btn btn-quiet btn-small" data-busy-label="Choosing…">Choose this mix</button>

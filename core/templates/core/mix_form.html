@@ -1,4 +1,5 @@
 {% extends "core/base.html" %}
+{% load ration %}
 
 {% block title %}{% if mix.pk %}{{ mix.name }}{% else %}New mix ratio{% endif %} · Ration{% endblock %}
 
@@ -13,7 +14,7 @@
 <form method="post" novalidate>
   {% csrf_token %}
   {% for error in form.non_field_errors %}<div class="notice notice-error" role="alert">{{ error }}</div>{% endfor %}
-  {% if form.errors or formset.total_error_count %}
+  {% if form.errors %}
   <div class="notice notice-error" role="alert">Some fields need fixing before this mix can be saved.</div>
   {% endif %}
 
@@ -35,44 +36,21 @@
         <p class="muted small">Quantities are in each material's own measure, e.g. 3 wheelbarrows of sand and 1 pocket of cement.</p>
       </div>
     </div>
-    {{ formset.management_form }}
-    {% for error in formset.non_form_errors %}<div class="notice notice-error" role="alert">{{ error }}</div>{% endfor %}
-    <div class="table-wrap">
-      <table class="table">
-        <thead>
-          <tr>
-            <th scope="col">Material</th>
-            <th scope="col">Quantity per batch</th>
-            <th scope="col" class="num">Remove</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for ingredient_form in formset %}
-          <tr>
-            <td style="min-width: 180px;">
-              {% for hidden in ingredient_form.hidden_fields %}{{ hidden }}{% endfor %}
-              <label class="visually-hidden" for="{{ ingredient_form.material.id_for_label }}">Material, row {{ forloop.counter }}</label>
-              {{ ingredient_form.material }}
-              {% for error in ingredient_form.material.errors %}<span class="field-error">{{ error }}</span>{% endfor %}
-              {% for error in ingredient_form.non_field_errors %}<span class="field-error">{{ error }}</span>{% endfor %}
-            </td>
-            <td style="min-width: 140px;">
-              <label class="visually-hidden" for="{{ ingredient_form.quantity.id_for_label }}">Quantity per batch, row {{ forloop.counter }}</label>
-              {{ ingredient_form.quantity }}
-              {% for error in ingredient_form.quantity.errors %}<span class="field-error">{{ error }}</span>{% endfor %}
-            </td>
-            <td class="num">
-              {% if ingredient_form.instance.pk %}
-              <label class="visually-hidden" for="{{ ingredient_form.DELETE.id_for_label }}">Remove row {{ forloop.counter }}</label>
-              {{ ingredient_form.DELETE }}
-              {% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    <p class="muted small">Need another material? Save the mix and three empty rows appear again.</p>
+    <ul class="batch-rows">
+      {% for material, field in form.material_rows %}
+      <li class="batch-row{% if field.errors %} has-error{% endif %}">
+        <label for="{{ field.id_for_label }}"><span class="swatch tone-{{ material|material_tone }}"></span>{{ material.name }}{% if not material.is_active %} <span class="muted small">(unavailable)</span>{% endif %}</label>
+        <div class="batch-input">
+          {{ field }}
+          <span class="muted">{{ material.base_unit }}s</span>
+        </div>
+        {% for error in field.errors %}<span class="field-error">{{ error }}</span>{% endfor %}
+      </li>
+      {% empty %}
+      <li class="empty">No materials yet. Add sand, stone and cement in <a href="{% url 'config' %}">Mixes and prices</a> first.</li>
+      {% endfor %}
+    </ul>
+    <p class="muted small">Leave a material empty if the mix doesn't use it.</p>
   </section>
 
   <div class="actions" style="margin-top: 32px;">

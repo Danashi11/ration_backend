@@ -19,8 +19,15 @@ class Project(models.Model):
         DRAFT = 'draft', 'Draft'
         PENDING = 'pending', 'Pending'
         APPROVED = 'approved', 'Approved'
-        DECLINED = 'declined', 'Declined'
         COMPLETED = 'completed', 'Completed'
+
+    # The one step a manager can take from each status. Pending -> approved, and
+    # pending -> draft on a decline, are the accountant's (see ProjectApproval).
+    MANAGER_NEXT = {
+        Status.DRAFT: Status.PENDING,
+        Status.PENDING: Status.DRAFT,
+        Status.APPROVED: Status.COMPLETED,
+    }
 
     name = models.CharField(max_length=255)
     description = models.TextField(null=True, blank=True)
@@ -39,6 +46,20 @@ class Project(models.Model):
         return self.name
 
     @property
+    def is_editable(self):
+        """Name, block counts and mix choices can only change while the project is a draft."""
+        return self.status == self.Status.DRAFT
+
+    @property
+    def prices_editable(self):
+        """Project material prices can still change while the project waits for approval."""
+        return self.status in (self.Status.DRAFT, self.Status.PENDING)
+
+    @property
+    def manager_next_status(self):
+        return self.MANAGER_NEXT.get(self.status)
+
+    @property
     def is_locked(self):
         """Completed projects are history: their costs are saved and they can't be changed."""
         return self.status == self.Status.COMPLETED
@@ -53,7 +74,7 @@ class ProjectBlock(models.Model):
     block_type = models.CharField(max_length=1, choices=BlockType.choices)
     quantity = models.PositiveIntegerField()
     required_strength_mpa = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
-    # The mix chosen for this line; empty means "use the cheapest suitable mix".
+    # The mix the manager chose for this line; empty until they choose.
     mix = models.ForeignKey('MixRatio', on_delete=models.SET_NULL, null=True, blank=True, related_name='project_blocks')
 
     class Meta:

@@ -20,3 +20,4 @@ def role_required(check):
 manager_required = role_required(lambda user: user.is_manager)
 price_reviewer_required = role_required(lambda user: user.can_review_prices)
 config_viewer_required = role_required(lambda user: user.can_view_config)
+project_approver_required = role_required(lambda user: user.can_approve_projects)

@@ -108,16 +108,39 @@ class ViewTests(BaseTestCase):
         self.assertContains(response, 'Batch 4 (optimum)')
         self.assertContains(response, '484.08')
 
-    def test_create_mix_with_ingredients(self):
-        sand = Material.objects.get(name='Sand')
-        response = self.client.post(reverse('mix_new'), {
-            'name': 'Half mix', 'block_type': 'H', 'strength_mpa': '5', 'blocks_per_batch': '40', 'is_active': 'on',
-            'ingredients-TOTAL_FORMS': '1', 'ingredients-INITIAL_FORMS': '0',
-            'ingredients-0-material': sand.pk, 'ingredients-0-quantity': '3',
-        })
+    def mix_post(self, **quantities):
+        data = {'name': 'Half mix', 'block_type': 'H', 'strength_mpa': '5', 'blocks_per_batch': '40', 'is_active': 'on'}
+        for material in Material.objects.all():
+            data[f'qty_{material.pk}'] = quantities.get(material.name, '')
+        return data
+
+    def test_create_mix_with_fixed_materials(self):
+        response = self.client.post(reverse('mix_new'), self.mix_post(**{'Sand': '3', 'Cement 50kg': '1'}))
         self.assertRedirects(response, reverse('config'))
         mix = MixRatio.objects.get(name='Half mix')
-        self.assertEqual(mix.ingredients.get().unit, 'wheelbarrow')
+        self.assertEqual(
+            {(i.material.name, i.quantity, i.unit) for i in mix.ingredients.select_related('material')},
+            {('Sand', Decimal('3'), 'wheelbarrow'), ('Cement 50kg', Decimal('1'), 'bag')},
+        )
+
+    def test_mix_form_shows_one_row_per_material(self):
+        response = self.client.get(reverse('mix_new'))
+        for material in Material.objects.all():
+            self.assertContains(response, f'name="qty_{material.pk}"')
+        self.assertNotContains(response, 'ingredients-TOTAL_FORMS')
+
+    def test_editing_mix_updates_and_removes_quantities(self):
+        mix = MixRatio.objects.get(name='Batch 2')
+        data = self.mix_post(**{'Sand': '4', 'Cement 50kg': '1'})
+        data.update({'name': 'Batch 2', 'block_type': 'B', 'blocks_per_batch': '35'})
+        self.client.post(reverse('mix_edit', args=[mix.pk]), data)
+        quantities = {i.material.name: i.quantity for i in mix.ingredients.select_related('material')}
+        self.assertEqual(quantities, {'Sand': Decimal('4'), 'Cement 50kg': Decimal('1')})
+
+    def test_mix_needs_at_least_one_quantity(self):
+        response = self.client.post(reverse('mix_new'), self.mix_post())
+        self.assertContains(response, 'Enter a quantity for at least one material.')
+        self.assertFalse(MixRatio.objects.filter(name='Half mix').exists())
 
     def test_add_price_then_config_page_lists_it(self):
         sand = Material.objects.get(name='Sand')
@@ -422,41 +445,173 @@ class ProjectStatusTests(BaseTestCase):
         self.project = Project.objects.create(name='House', created_by=self.user)
         self.block = ProjectBlock.objects.create(project=self.project, block_type='F', quantity=70)
         self.url = reverse('project_status', args=[self.project.pk])
+        self.review_url = reverse('project_review', args=[self.project.pk])
+        self.detail = reverse('project_detail', args=[self.project.pk])
+        self.accountant = User.objects.create_user(
+            'acc', 'acc@example.com', 'S0me-strong-pass', full_name='Accountant', role=User.Role.ACCOUNTANT,
+        )
 
     def choose_mix(self):
         self.block.mix = MixRatio.objects.get(name='Batch 4 (optimum)')
         self.block.save()
 
-    def complete(self):
+    def status(self):
+        self.project.refresh_from_db()
+        return self.project.status
+
+    def send_for_approval(self):
         self.choose_mix()
+        self.client.post(self.url, {'status': 'pending'})
+
+    def approve(self):
+        self.send_for_approval()
+        self.client.force_login(self.accountant)
+        self.client.post(self.review_url, {'decision': 'approved'})
+        self.client.force_login(self.user)
+
+    def complete(self):
+        self.approve()
         return self.client.post(self.url, {'status': 'completed'})
 
-    def test_manager_changes_status(self):
-        self.assertRedirects(self.client.post(self.url, {'status': 'approved'}),
-                             reverse('project_detail', args=[self.project.pk]))
-        self.project.refresh_from_db()
-        self.assertEqual(self.project.status, 'approved')
+    # ----- manager steps -----
 
-    def test_unknown_status_is_rejected(self):
-        self.client.post(self.url, {'status': 'archived'})
-        self.project.refresh_from_db()
-        self.assertEqual(self.project.status, 'draft')
+    def test_new_project_starts_as_draft(self):
+        self.assertEqual(self.status(), 'draft')
+        self.assertEqual(self.project.manager_next_status, 'pending')
 
-    def test_cannot_complete_without_chosen_mixes(self):
-        self.client.post(self.url, {'status': 'completed'})
+    def test_draft_to_pending_needs_chosen_mixes(self):
+        self.client.post(self.url, {'status': 'pending'})
+        self.assertEqual(self.status(), 'draft')
+        self.send_for_approval()
+        self.assertEqual(self.status(), 'pending')
+
+    def test_pending_back_to_draft(self):
+        self.send_for_approval()
+        self.client.post(self.url, {'status': 'draft'})
+        self.assertEqual(self.status(), 'draft')
+
+    def test_manager_cannot_skip_steps(self):
+        self.choose_mix()
+        for status in ('approved', 'completed', 'declined', 'draft'):
+            self.client.post(self.url, {'status': status})
+            self.assertEqual(self.status(), 'draft', status)
+        self.client.post(self.url, {'status': 'pending'})
+        for status in ('approved', 'completed', 'pending'):
+            self.client.post(self.url, {'status': status})
+            self.assertEqual(self.status(), 'pending', status)
+
+    def test_manager_cannot_approve(self):
+        self.send_for_approval()
+        self.client.post(self.review_url, {'decision': 'approved'})
+        self.assertEqual(self.status(), 'pending')
+
+    def test_status_form_shows_only_the_next_step(self):
+        self.choose_mix()
+        response = self.client.get(self.detail)
+        self.assertContains(response, 'Send for approval')
+        self.assertNotContains(response, 'Back to draft')
+        self.assertNotContains(response, 'Mark completed')
+        self.client.post(self.url, {'status': 'pending'})
+        response = self.client.get(self.detail)
+        self.assertContains(response, 'Back to draft')
+        self.assertNotContains(response, 'value="pending"')
+
+    # ----- pending lock -----
+
+    def test_pending_project_only_allows_price_changes(self):
+        self.send_for_approval()
+        mix = MixRatio.objects.get(name='Batch 2')
+        for response in (
+            self.client.get(reverse('project_edit', args=[self.project.pk])),
+            self.client.post(reverse('project_edit', args=[self.project.pk]),
+                             {'name': 'X', 'full_quantity': '1', 'half_quantity': '0'}),
+            self.client.post(reverse('project_choose_mix', args=[self.project.pk, self.block.pk]), {'mix': mix.pk}),
+            self.client.post(reverse('project_delete', args=[self.project.pk])),
+        ):
+            self.assertRedirects(response, self.detail)
         self.project.refresh_from_db()
-        self.assertEqual(self.project.status, 'draft')
-        self.assertFalse(self.project.estimates.exists())
+        self.block.refresh_from_db()
+        self.assertEqual(self.project.name, 'House')
+        self.assertEqual(self.block.mix.name, 'Batch 4 (optimum)')
+
+        sand = Material.objects.get(name='Sand')
+        self.client.post(reverse('project_price_add', args=[self.project.pk]), {
+            'price-material': sand.pk, 'price-price': '20', 'price-price_unit': 'base', 'price-currency': 'ZAR',
+        })
+        price = MaterialPrice.objects.get(project=self.project)
+        self.client.post(reverse('price_delete', args=[price.pk]))
+        self.assertFalse(MaterialPrice.objects.filter(project=self.project).exists())
+
+    def test_pending_page_hides_edit_controls_but_keeps_price_form(self):
+        self.send_for_approval()
+        response = self.client.get(self.detail)
+        self.assertNotContains(response, 'Edit project')
+        self.assertNotContains(response, 'Choose this mix')
+        self.assertContains(response, 'Set a price for this project')
+
+    # ----- accountant decisions -----
+
+    def test_accountant_approves_pending_project(self):
+        self.approve()
+        self.assertEqual(self.status(), 'approved')
+        approval = self.project.approvals.get()
+        self.assertEqual((approval.decision, approval.reviewed_by), ('approved', self.accountant))
+
+    def test_accountant_declines_back_to_draft_with_comment(self):
+        self.send_for_approval()
+        self.client.force_login(self.accountant)
+        self.client.post(self.review_url, {'decision': 'declined', 'comments': ''})
+        self.assertEqual(self.status(), 'pending')  # a comment is required
+        self.client.post(self.review_url, {'decision': 'declined', 'comments': 'Use Batch 2 instead.'})
+        self.assertEqual(self.status(), 'draft')
+        self.assertEqual(self.project.approvals.get().comments, 'Use Batch 2 instead.')
+        self.client.force_login(self.user)
+        self.assertContains(self.client.get(self.detail), 'Use Batch 2 instead.')
+
+    def test_accountant_cannot_approve_unpriced_project(self):
+        MaterialPrice.objects.filter(material__name='Sand').delete()
+        self.send_for_approval()
+        self.client.force_login(self.accountant)
+        self.client.post(self.review_url, {'decision': 'approved'})
+        self.assertEqual(self.status(), 'pending')
+
+    def test_review_only_for_pending_projects(self):
+        self.choose_mix()
+        self.client.force_login(self.accountant)
+        self.client.post(self.review_url, {'decision': 'approved'})
+        self.assertEqual(self.status(), 'draft')
+
+    def test_creator_cannot_review(self):
+        self.send_for_approval()
+        creator = User.objects.create_user('cre', 'cre@example.com', 'S0me-strong-pass', role=User.Role.CREATOR)
+        self.client.force_login(creator)
+        self.assertEqual(self.client.post(self.review_url, {'decision': 'approved'}).status_code, 403)
+
+    def test_project_list_tells_accountant_about_pending_projects(self):
+        self.send_for_approval()
+        self.client.force_login(self.accountant)
+        self.assertContains(self.client.get(reverse('project_list')), '1 project waiting for your approval')
+
+    # ----- approved and completed -----
+
+    def test_approved_project_cannot_be_edited_or_priced(self):
+        self.approve()
+        sand = Material.objects.get(name='Sand')
+        self.assertRedirects(self.client.get(reverse('project_edit', args=[self.project.pk])), self.detail)
+        self.client.post(reverse('project_price_add', args=[self.project.pk]), {
+            'price-material': sand.pk, 'price-price': '20', 'price-price_unit': 'base', 'price-currency': 'ZAR',
+        })
+        self.assertFalse(MaterialPrice.objects.filter(project=self.project).exists())
+        self.client.post(self.url, {'status': 'draft'})
+        self.assertEqual(self.status(), 'approved')
 
     def test_completing_saves_costs_as_history(self):
         self.complete()
-        self.project.refresh_from_db()
-        self.assertEqual(self.project.status, 'completed')
+        self.assertEqual(self.status(), 'completed')
         self.assertIsNotNone(self.project.completed_at)
         estimate = self.project.estimates.get()
         # 70 full with Batch 4: 3 batches x (2 x 16.43 + 2 x 21.75 + 85).
         self.assertEqual(estimate.total_material_cost, Decimal('484.08'))
-        self.assertEqual(estimate.version, 1)
         self.assertEqual(estimate.breakdown[0]['mix'], 'Batch 4 (optimum)')
         per_batch = {i['material']: Decimal(i['quantity']) for i in estimate.breakdown[0]['ingredients']}
         self.assertEqual(per_batch, {'Sand': 2, 'Stone 13mm': 2, 'Cement 50kg': 1})
@@ -466,43 +621,17 @@ class ProjectStatusTests(BaseTestCase):
     def test_history_ignores_later_price_changes(self):
         self.complete()
         self.approve_price('Cement 50kg', '200.00')
-        response = self.client.get(reverse('project_detail', args=[self.project.pk]))
+        response = self.client.get(self.detail)
         self.assertContains(response, 'R 484.08')
         self.assertContains(response, 'Later price or mix changes')
 
     def test_completed_project_is_locked(self):
         self.complete()
-        detail = reverse('project_detail', args=[self.project.pk])
-        mix = MixRatio.objects.get(name='Batch 2')
-        sand = Material.objects.get(name='Sand')
-        attempts = [
-            self.client.get(reverse('project_edit', args=[self.project.pk])),
-            self.client.post(reverse('project_edit', args=[self.project.pk]),
-                             {'name': 'X', 'full_quantity': '1', 'half_quantity': '0'}),
-            self.client.post(reverse('project_delete', args=[self.project.pk])),
-            self.client.post(reverse('project_choose_mix', args=[self.project.pk, self.block.pk]), {'mix': mix.pk}),
-            self.client.post(reverse('project_price_add', args=[self.project.pk]), {
-                'price-material': sand.pk, 'price-price': '1', 'price-price_unit': 'base', 'price-currency': 'ZAR',
-            }),
-            self.client.post(self.url, {'status': 'draft'}),
-        ]
-        for response in attempts:
-            self.assertRedirects(response, detail)
-        self.project.refresh_from_db()
-        self.block.refresh_from_db()
-        self.assertEqual((self.project.name, self.project.status), ('House', 'completed'))
-        self.assertEqual(self.block.mix.name, 'Batch 4 (optimum)')
-        self.assertFalse(MaterialPrice.objects.filter(project=self.project).exists())
-
-    def test_completed_page_hides_edit_controls(self):
-        self.complete()
-        response = self.client.get(reverse('project_detail', args=[self.project.pk]))
+        for status in ('draft', 'pending', 'approved'):
+            self.client.post(self.url, {'status': status})
+        self.assertEqual(self.status(), 'completed')
+        self.assertRedirects(self.client.post(reverse('project_delete', args=[self.project.pk])), self.detail)
+        response = self.client.get(self.detail)
         self.assertNotContains(response, 'Edit project')
-        self.assertNotContains(response, 'Choose this mix')
-        self.assertNotContains(response, 'Change status')
+        self.assertNotContains(response, 'Mark completed')
         self.assertContains(response, 'kept as history')
-
-    def test_only_manager_changes_status(self):
-        accountant = User.objects.create_user('acc', 'acc@example.com', 'S0me-strong-pass', role=User.Role.ACCOUNTANT)
-        self.client.force_login(accountant)
-        self.assertEqual(self.client.post(self.url, {'status': 'approved'}).status_code, 403)

@@ -1,0 +1,34 @@
+{% load ration %}
+<div class="status-bar" role="region" aria-label="Project status">
+  <ol class="stepper">
+    {% for step in status_steps %}
+    <li class="is-{{ step.state }}"{% if step.state == 'current' %} aria-current="step"{% endif %}>
+      <span class="step-dot" aria-hidden="true">{% if step.state == 'done' %}✓{% else %}{{ forloop.counter }}{% endif %}</span>
+      <span class="step-label">{{ step.label }}</span>
+    </li>
+    {% endfor %}
+  </ol>
+
+  <div class="status-bar-actions">
+    {% if user.can_approve_projects and project.status == 'pending' %}
+      <form method="post" action="{% url 'project_review' project.pk %}">
+        {% csrf_token %}
+        <button type="submit" name="decision" value="approved" class="btn" data-busy-label="Approving…"
+                {% if estimate.total is None %}disabled title="Some materials have no approved price yet"{% endif %}>Approve</button>
+      </form>
+      <a href="#project-status" class="btn btn-quiet">Decline…</a>
+    {% endif %}
+
+    {% include "core/_status_action.html" with compact=True %}
+
+    {% if project.is_locked %}
+      <span class="status-bar-note">Completed on {{ project.completed_at|date:"j M Y" }}. Kept as history.</span>
+    {% elif project.status == 'pending' and not user.can_approve_projects and not user.is_manager %}
+      <span class="status-bar-note">Waiting for an accountant.</span>
+    {% elif project.status == 'approved' and not user.is_manager %}
+      <span class="status-bar-note">Approved, so it can't be edited. A manager marks it completed when the work is done.</span>
+    {% elif project.status == 'draft' and not user.is_manager %}
+      <span class="status-bar-note">A manager is still preparing this project.</span>
+    {% endif %}
+  </div>
+</div>

@@ -1,5 +1,5 @@
 from django import forms
-from django.forms import inlineformset_factory
+from django.db import models
 
 from .models import Material, MaterialPrice, MixIngredient, MixRatio, Project
 
@@ -99,6 +99,8 @@ class MaterialPriceForm(forms.ModelForm):
 
 
 class MixRatioForm(forms.ModelForm):
+    """A mix with one quantity box per material (sand, stone, cement) instead of picking materials."""
+
     class Meta:
         model = MixRatio
         fields = ['name', 'block_type', 'strength_mpa', 'blocks_per_batch', 'is_active']
@@ -109,22 +111,55 @@ class MixRatioForm(forms.ModelForm):
             'is_active': 'Active',
         }
 
-
-class MixIngredientForm(forms.ModelForm):
-    class Meta:
-        model = MixIngredient
-        fields = ['material', 'quantity']
-        labels = {'quantity': 'Quantity per batch'}
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields['material'].queryset = Material.objects.filter(is_active=True)
+        existing = {i.material_id: i for i in self.instance.ingredients.all()} if self.instance.pk else {}
+        # Every available material, plus any unavailable one this mix already uses.
+        self.materials = sorted(
+            Material.objects.filter(models.Q(is_active=True) | models.Q(pk__in=existing.keys())),
+            key=self.recipe_order,
+        )
+        for material in self.materials:
+            ingredient = existing.get(material.pk)
+            self.fields[self.quantity_field(material)] = forms.DecimalField(
+                label=material.name, required=False, min_value=0, max_digits=12, decimal_places=3,
+                initial=ingredient.quantity.normalize() if ingredient else None,
+                widget=forms.NumberInput(attrs={'step': '0.5', 'inputmode': 'decimal', 'placeholder': '0'}),
+            )
+
+    @staticmethod
+    def recipe_order(material):
+        """Sand, stone, cement first, as on the mix ratio sheet; anything else after, by name."""
+        name = material.name.lower()
+        rank = next((i for i, word in enumerate(('sand', 'stone', 'cement')) if word in name), 3)
+        return rank, name
+
+    @staticmethod
+    def quantity_field(material):
+        return f'qty_{material.pk}'
+
+    def material_rows(self):
+        """(material, bound field) pairs for the template."""
+        return [(m, self[self.quantity_field(m)]) for m in self.materials]
+
+    def clean(self):
+        cleaned = super().clean()
+        if not any(cleaned.get(self.quantity_field(m)) for m in self.materials):
+            raise forms.ValidationError('Enter a quantity for at least one material.')
+        return cleaned
 
     def save(self, commit=True):
-        self.instance.unit = self.cleaned_data['material'].base_unit
-        return super().save(commit)
+        mix = super().save(commit=commit)
+        if commit:
+            self.save_ingredients(mix)
+        return mix
 
-
-MixIngredientFormSet = inlineformset_factory(
-    MixRatio, MixIngredient, form=MixIngredientForm, extra=3, can_delete=True
-)
+    def save_ingredients(self, mix):
+        for material in self.materials:
+            quantity = self.cleaned_data.get(self.quantity_field(material))
+            if quantity:
+                MixIngredient.objects.update_or_create(
+                    mix=mix, material=material, defaults={'quantity': quantity, 'unit': material.base_unit},
+                )
+            else:
+                MixIngredient.objects.filter(mix=mix, material=material).delete()

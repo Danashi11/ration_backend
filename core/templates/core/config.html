@@ -102,7 +102,7 @@
         {% include "core/_field.html" with field=price_form.currency %}
       </div>
       {% include "core/_field.html" with field=price_form.price_unit %}
-      <div class="field"><button type="submit" class="btn btn-small" data-busy-label="Sending…">Send for approval</button></div>
+      <div class="field"><button type="submit" class="btn btn-small" data-busy-label="Sending…">Send price for approval</button></div>
     </form>
 
     <form method="post" action="{% url 'material_add' %}" class="subform" novalidate>

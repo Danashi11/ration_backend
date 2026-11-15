@@ -11,11 +11,15 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_POST
 
 from .forms import (
-    MaterialEditForm, MaterialForm, MaterialPriceForm, MixIngredientFormSet, MixRatioForm,
+    MaterialEditForm, MaterialForm, MaterialPriceForm, MixRatioForm,
     ProjectEditForm, ProjectForm,
 )
-from .models import BlockType, Material, MaterialPrice, MixBlockType, MixRatio, Project, ProjectBlock
-from .permissions import config_viewer_required, manager_required, price_reviewer_required
+from .models import (
+    BlockType, Material, MaterialPrice, MixBlockType, MixRatio, Project, ProjectApproval, ProjectBlock,
+)
+from .permissions import (
+    config_viewer_required, manager_required, price_reviewer_required, project_approver_required,
+)
 from .services import estimate_project, latest_approved_prices, price_per_base_unit, save_estimate
 from .templatetags.ration import money
 
@@ -61,7 +65,12 @@ def project_list_view(request):
         MaterialPrice.objects.filter(status=MaterialPrice.Status.PENDING).count()
         if request.user.can_review_prices else 0
     )
+    pending_projects = (
+        Project.objects.filter(status=Project.Status.PENDING).count()
+        if request.user.can_approve_projects else 0
+    )
     return render(request, 'core/project_list.html', {
+        'pending_projects': pending_projects,
         'projects': projects.order_by('-created_at'),
         'statuses': statuses,
         'status': status,
@@ -129,11 +138,12 @@ def project_detail_view(request, pk):
         'project_prices': project.material_prices.select_related('material', 'created_by', 'reviewed_by')
         .order_by('-created_at'),
         'final': project.final_estimate,
-        'statuses': [choice for choice in Project.Status.choices if choice[0] != project.status],
+        'approvals': project.approvals.select_related('reviewed_by').order_by('-reviewed_at'),
+        'status_steps': _status_steps(project),
     }
     if context['final']:
         context['final_materials'] = context['final'].materials.select_related('material')
-    if request.user.is_manager:
+    if request.user.is_manager and project.prices_editable:
         # Default to the currency this project is already priced in, so totals stay addable.
         currency = estimate['currency'] or next(
             (row['price'].currency for row in material_rows if row['price']), 'ZAR'
@@ -146,8 +156,8 @@ def project_detail_view(request, pk):
 @require_POST
 def project_choose_mix_view(request, pk, block_pk):
     block = get_object_or_404(ProjectBlock.objects.select_related('project'), pk=block_pk, project_id=pk)
-    if block.project.is_locked:
-        return _locked(request, block.project)
+    if not block.project.is_editable:
+        return _not_editable(request, block.project)
     block.mix = get_object_or_404(
         MixRatio, pk=request.POST.get('mix') or 0, is_active=True,
         block_type__in=[block.block_type, MixBlockType.BOTH],
@@ -161,8 +171,8 @@ def project_choose_mix_view(request, pk, block_pk):
 @require_POST
 def project_price_add_view(request, pk):
     project = get_object_or_404(Project, pk=pk)
-    if project.is_locked:
-        return _locked(request, project)
+    if not project.prices_editable:
+        return _not_editable(request, project)
     form = MaterialPriceForm(request.POST, prefix='price')
     if form.is_valid():
         price = form.save(commit=False)
@@ -178,22 +188,33 @@ def project_price_add_view(request, pk):
 @manager_required
 @require_POST
 def project_status_view(request, pk):
+    """The manager's one step from the current status: draft <-> pending, approved -> completed."""
     project = get_object_or_404(Project, pk=pk)
-    if project.is_locked:
-        return _locked(request, project)
     status = request.POST.get('status')
-    if status not in Project.Status.values or status == project.status:
-        messages.error(request, 'Choose a new status.')
-        return redirect('project_detail', pk=pk)
+    if not project.manager_next_status or status != project.manager_next_status:
+        messages.error(request, 'That status change isn\'t available from here.')
+        return redirect(f"{reverse('project_detail', args=[pk])}#project-status")
+    back = f"{reverse('project_detail', args=[pk])}#project-status"
 
-    if status == Project.Status.COMPLETED:
+    if status == Project.Status.PENDING:
+        unchosen = project.blocks.filter(mix__isnull=True)
+        if unchosen.exists():
+            messages.error(request, 'Choose a mix for every block type before sending the project for approval.')
+            return redirect(back)
+        project.status = status
+        project.save(update_fields=['status', 'updated_at'])
+        messages.success(request, 'Project sent for approval. Only its material prices can change while it waits.')
+
+    elif status == Project.Status.DRAFT:
+        project.status = status
+        project.save(update_fields=['status', 'updated_at'])
+        messages.success(request, 'Project moved back to draft. Send it for approval again when it\'s ready.')
+
+    else:  # approved -> completed
         estimate = estimate_project(project)
         if estimate['total'] is None:
-            messages.error(
-                request,
-                'A project can only be completed once every block type has a chosen mix with approved prices.',
-            )
-            return redirect(f"{reverse('project_detail', args=[pk])}#project-status")
+            messages.error(request, 'Every material in the chosen mixes needs an approved price before completing.')
+            return redirect(back)
         with transaction.atomic():
             saved = save_estimate(project, request.user, estimate)
             project.status = status
@@ -203,18 +224,50 @@ def project_status_view(request, pk):
             request,
             f'Project completed. Its costs are saved as history ({money(saved.total_material_cost, saved.currency)}).',
         )
-    else:
-        project.status = status
+    return redirect('project_detail', pk=pk)
+
+
+@project_approver_required
+@require_POST
+def project_review_view(request, pk):
+    """Accountant decision on a pending project: approve it, or decline it back to draft."""
+    project = get_object_or_404(Project, pk=pk)
+    back = f"{reverse('project_detail', args=[pk])}#project-status"
+    if project.status != Project.Status.PENDING:
+        messages.error(request, 'Only projects waiting for approval can be reviewed.')
+        return redirect(back)
+
+    decision = request.POST.get('decision')
+    comments = request.POST.get('comments', '').strip()
+    if decision not in ProjectApproval.Decision.values:
+        messages.error(request, 'Choose approve or decline.')
+        return redirect(back)
+    if decision == ProjectApproval.Decision.DECLINED and not comments:
+        messages.error(request, 'Say what needs changing so the manager can fix it.')
+        return redirect(back)
+    if decision == ProjectApproval.Decision.APPROVED and estimate_project(project)['total'] is None:
+        messages.error(request, 'This project can\'t be approved until every material in its mixes has an approved price.')
+        return redirect(back)
+
+    with transaction.atomic():
+        ProjectApproval.objects.create(
+            project=project, reviewed_by=request.user, decision=decision, comments=comments or None,
+        )
+        project.status = Project.Status.APPROVED if decision == ProjectApproval.Decision.APPROVED else Project.Status.DRAFT
         project.save(update_fields=['status', 'updated_at'])
-        messages.success(request, f'Status changed to {project.get_status_display().lower()}.')
+
+    if decision == ProjectApproval.Decision.APPROVED:
+        messages.success(request, f'"{project.name}" approved.')
+    else:
+        messages.success(request, f'"{project.name}" declined and sent back to the manager as a draft.')
     return redirect('project_detail', pk=pk)
 
 
 @manager_required
 def project_edit_view(request, pk):
     project = get_object_or_404(Project, pk=pk)
-    if project.is_locked:
-        return _locked(request, project)
+    if not project.is_editable:
+        return _not_editable(request, project)
     form = ProjectEditForm(request.POST or None, instance=project)
     if request.method == 'POST' and form.is_valid():
         with transaction.atomic():
@@ -229,8 +282,8 @@ def project_edit_view(request, pk):
 @require_POST
 def project_delete_view(request, pk):
     project = get_object_or_404(Project, pk=pk)
-    if project.is_locked:
-        return _locked(request, project)
+    if not project.is_editable:
+        return _not_editable(request, project)
     try:
         project.delete()
     except ProtectedError:
@@ -322,7 +375,10 @@ def price_add_view(request):
 @require_POST
 def price_delete_view(request, pk):
     # Reviewed prices stay as history (business rule 2); only pending ones can be withdrawn.
-    price = get_object_or_404(MaterialPrice, pk=pk, status=MaterialPrice.Status.PENDING)
+    price = get_object_or_404(MaterialPrice.objects.select_related('project'), pk=pk,
+                              status=MaterialPrice.Status.PENDING)
+    if price.project and not price.project.prices_editable:
+        return _not_editable(request, price.project)
     price.delete()
     messages.success(request, f'Pending price for {price.material} withdrawn.')
     return _back(request)
@@ -375,15 +431,12 @@ def price_review_view(request, pk):
 def mix_edit_view(request, pk=None):
     mix = get_object_or_404(MixRatio, pk=pk) if pk else MixRatio()
     form = MixRatioForm(request.POST or None, instance=mix)
-    formset = MixIngredientFormSet(request.POST or None, instance=mix)
-    if request.method == 'POST' and form.is_valid() and formset.is_valid():
+    if request.method == 'POST' and form.is_valid():
         with transaction.atomic():
             mix = form.save()
-            formset.instance = mix
-            formset.save()
         messages.success(request, f'Mix "{mix.name}" saved.')
         return redirect('config')
-    return render(request, 'core/mix_form.html', {'form': form, 'formset': formset, 'mix': mix})
+    return render(request, 'core/mix_form.html', {'form': form, 'mix': mix})
 
 
 @manager_required
@@ -395,8 +448,24 @@ def mix_delete_view(request, pk):
     return redirect('config')
 
 
-def _locked(request, project):
-    messages.error(request, f'"{project.name}" is completed and kept as history, so it can\'t be changed.')
+def _status_steps(project):
+    """Draft, pending, approved, completed, each marked done, current or upcoming."""
+    values = Project.Status.values
+    current = values.index(project.status)
+    return [
+        {'label': label, 'state': 'done' if i < current else 'current' if i == current else 'upcoming'}
+        for i, (value, label) in enumerate(Project.Status.choices)
+    ]
+
+
+def _not_editable(request, project):
+    if project.is_locked:
+        reason = 'is completed and kept as history, so it can\'t be changed'
+    elif project.status == Project.Status.PENDING:
+        reason = 'is waiting for approval. Only its material prices can change; move it back to draft to edit the rest'
+    else:
+        reason = 'is approved, so it can\'t be changed'
+    messages.error(request, f'"{project.name}" {reason}.')
     return redirect('project_detail', pk=project.pk)
 
 

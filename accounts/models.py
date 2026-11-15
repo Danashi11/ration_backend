@@ -21,7 +21,7 @@ class User(AbstractUser):
     def __str__(self):
         return self.full_name or self.username
 
-    # Role rules: managers add, edit and remove everything; accountants review prices;
+    # Role rules: managers add, edit and remove everything; accountants review prices and projects;
     # creators only read approved project reports. Superusers can do everything.
 
     @property
@@ -30,6 +30,10 @@ class User(AbstractUser):
 
     @property
     def can_review_prices(self):
+        return self.is_superuser or self.role == self.Role.ACCOUNTANT
+
+    @property
+    def can_approve_projects(self):
         return self.is_superuser or self.role == self.Role.ACCOUNTANT
 
     @property

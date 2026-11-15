@@ -2,36 +2,54 @@
 <section class="section status-panel" aria-labelledby="project-status-title" id="project-status">
   <div class="section-head"><h2 id="project-status-title">Project status</h2></div>
 
+
   <div class="status-now">
-    <span class="status status-{{ project.status }} status-lg">{{ project.get_status_display }}</span>
+    <span class="status status-{{ project.status }}">{{ project.get_status_display }}</span>
     {% if project.is_locked %}
     <p class="muted">Completed on {{ project.completed_at|date:"j M Y" }}. This project is kept as history and can't be edited, re-priced or deleted.</p>
-    {% elif project.status == 'approved' %}
-    <p class="muted">Approved projects are visible to creators.</p>
     {% elif project.status == 'draft' %}
-    <p class="muted">Drafts are only visible to managers and accountants.</p>
+    <p class="muted">The manager can edit everything. Send it for approval when the mixes are chosen.</p>
+    {% elif project.status == 'pending' %}
+    <p class="muted">Waiting for an accountant. Only material prices can change; moving it back to draft unlocks the rest.</p>
+    {% elif project.status == 'approved' %}
+    <p class="muted">Approved and visible to creators. Nothing can be edited; mark it completed when the work is done.</p>
     {% endif %}
   </div>
 
-  {% if user.is_manager and not project.is_locked %}
-  <form method="post" action="{% url 'project_status' project.pk %}" class="status-form" novalidate
-        data-confirm-field="status" data-confirm-value="completed"
-        data-confirm-message="Complete this project? Its costs are saved as history and it can't be edited afterwards.">
-    {% csrf_token %}
-    <div class="field">
-      <label for="new-status">Change status to</label>
-      <select name="status" id="new-status" required>
-        {% for value, label in statuses %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
-      </select>
-    </div>
-    <div class="field">
-      <button type="submit" class="btn" data-busy-label="Saving…">Change status</button>
-    </div>
-  </form>
-  {% if estimate.total is None %}
-  <p class="field-help">To complete the project, choose a mix with approved prices for every block type first.</p>
-  {% else %}
-  <p class="field-help">Completing saves today's total of {{ estimate.total|money:estimate.currency }} and the prices used, then locks the project.</p>
+  {% include "core/_status_action.html" %}
+
+  {% if user.can_approve_projects and project.status == 'pending' %}
+  <div class="review-box">
+    <h3>Your decision</h3>
+    {% if estimate.total is not None %}
+    <p class="muted small">Total to approve: <strong class="review-total">{{ estimate.total|money:estimate.currency }}</strong></p>
+    {% else %}
+    <p class="muted small">This project can't be approved yet: some materials in its mixes have no approved price.</p>
+    {% endif %}
+    <form method="post" action="{% url 'project_review' project.pk %}" novalidate>
+      {% csrf_token %}
+      <div class="field">
+        <label for="review-comments">Comment <span class="muted">(required to decline)</span></label>
+        <textarea id="review-comments" name="comments" rows="2" placeholder="What should the manager change?"></textarea>
+      </div>
+      <div class="actions">
+        <button type="submit" name="decision" value="approved" class="btn" data-busy-label="Approving…"{% if estimate.total is None %} disabled{% endif %}>Approve project</button>
+        <button type="submit" name="decision" value="declined" class="btn btn-danger" data-busy-label="Declining…">Decline, back to draft</button>
+      </div>
+    </form>
+  </div>
   {% endif %}
+
+  {% if approvals %}
+  <h3 class="subhead">Approval history</h3>
+  <ul class="approval-list">
+    {% for approval in approvals %}
+    <li>
+      <span class="status status-{{ approval.decision }}">{{ approval.get_decision_display }}</span>
+      <span class="muted small">by {{ approval.reviewed_by }} on {{ approval.reviewed_at|date:"j M Y, H:i" }}</span>
+      {% if approval.comments %}<p>{{ approval.comments }}</p>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
   {% endif %}
 </section>
