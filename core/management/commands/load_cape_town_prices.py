@@ -23,7 +23,7 @@ class Command(BaseCommand):
     def handle(self, *args, email, **options):
         user = User.objects.filter(email__iexact=email).first()
         if user is None:
-            raise CommandError(f'No user with email {email}. Register first.')
+            raise CommandError(f'No user with email {email}. Create the account in the admin first.')
 
         now = timezone.now()
         for name, price in PRICES:
