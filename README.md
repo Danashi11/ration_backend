@@ -1,0 +1,254 @@
+# Ration
+
+Ration is a web app for concrete block yards. A manager enters how many full and half blocks a job needs, compares what every mix ratio (sand, stone and cement per batch) would cost with approved material prices, chooses a mix, and sends the project to an accountant for approval. Completed projects are saved as history with the prices that were used.
+
+Built with Django 6.1 and server-rendered templates. It runs on SQLite locally and on Postgres in production (Render).
+
+## Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Setup](#setup)
+- [Running the app](#running-the-app)
+- [Configuration](#configuration)
+- [Project structure](#project-structure)
+- [How costs are calculated](#how-costs-are-calculated)
+- [Tests](#tests)
+- [Deployment (Render + GitHub Actions)](#deployment-render--github-actions)
+- [Troubleshooting](#troubleshooting)
+
+## Features
+
+**Roles**
+
+| Role | Can do |
+|---|---|
+| Manager | Create, edit and delete projects (while they're drafts), choose a mix per block type, add mixes, materials and prices, move projects through their statuses. |
+| Accountant | Approve or decline material prices (optionally replacing a wrong price), approve or decline projects that are waiting for approval. |
+| Creator | Read approved and completed projects only. |
+| Superuser | Everything, plus the Django admin at `/admin/`. |
+
+There is no public sign-up. Accounts are created by an administrator in `/admin/` → **Users** → **Add user** (username, email, full name, role, password). People log in with their **email** and password.
+
+**Project status flow**
+
+```
+Draft ──Send for approval──▶ Pending ──Approve (accountant)──▶ Approved ──Mark completed──▶ Completed
+  ▲                             │
+  └──Back to draft / Decline────┘
+```
+
+- **Draft**: everything can be edited.
+- **Pending**: only the project's material prices can change. The manager moves it back to draft to edit anything else.
+- **Approved**: nothing can be edited. Visible to creators.
+- **Completed**: the total, the mixes and the prices are saved as a snapshot and the project is locked for good.
+
+**Prices**
+
+- Default prices apply to every project. A project can have its own prices that replace the defaults for that project only.
+- Every new price waits for an accountant. Only approved prices are used in calculations.
+- Prices can be entered per unit (wheelbarrow, bag) or per cubic metre for sand and stone (divided by 16 wheelbarrows).
+
+## Requirements
+
+- Python 3.12 or newer (production uses 3.13)
+- pip and `venv`
+- Git
+- Optional: Postgres 16, only if you want to run against Postgres locally. Docker is the easiest way.
+
+## Setup
+
+```bash
+git clone https://github.com/adelazzi/ration_backend.git
+cd ration_backend
+```
+
+Create and activate a virtual environment, then install the dependencies:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+Create your local settings file. With `DJANGO_DEBUG=true` and no `DATABASE_URL`, the app uses a local SQLite file (`db.sqlite3`):
+
+```bash
+cp .env.example .env
+```
+
+Create the database tables. This also loads the starting data: the materials **Sand**, **Stone 13mm** and **Cement 50kg**, and the mixes **Batch 1** to **Batch 4**.
+
+```bash
+python manage.py migrate
+```
+
+Create the first admin account (you'll be asked for a username, email and password):
+
+```bash
+python manage.py createsuperuser
+```
+
+Optional: load the sample Cape Town prices (sand R 16.43 and stone R 21.75 per wheelbarrow, cement R 85.00 per bag) as approved prices, recorded under an existing user's email:
+
+```bash
+python manage.py load_cape_town_prices admin@example.com
+```
+
+## Running the app
+
+```bash
+python manage.py runserver
+```
+
+Open http://localhost:8000 and log in with the email and password of the account you created.
+
+First steps after logging in as the superuser:
+
+1. Go to http://localhost:8000/admin/ → **Users** and create a manager and an accountant (or give your own account a role).
+2. As a manager, open **New project**, enter the block counts and choose a mix for each block type.
+3. Click **Send for approval**. As an accountant, open the project and click **Approve**.
+4. As a manager, click **Mark completed** to save the project as history.
+
+## Configuration
+
+Settings are read from environment variables, or from a `.env` file in the project folder for local development.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DJANGO_DEBUG` | `false` | `true` for local development. Never `true` in production. |
+| `DJANGO_SECRET_KEY` | none | Required when debug is off. Render generates one. |
+| `DATABASE_URL` | local SQLite | Postgres connection string, e.g. `postgres://user:pass@host:5432/ration`. |
+| `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Comma-separated host names the site answers to. Render's own host name is added automatically. |
+| `DJANGO_CSRF_TRUSTED_ORIGINS` | empty | Extra trusted origins, e.g. a custom domain `https://ration.example.com`. |
+| `DJANGO_SECURE_SSL_REDIRECT` | `true` | Redirect HTTP to HTTPS when debug is off. Set to `false` only for tests. |
+| `DJANGO_HSTS_SECONDS` | `3600` | HSTS duration when debug is off. |
+| `DJANGO_EMAIL_BACKEND` | console (debug) / SMTP | The app doesn't send email yet. |
+| `DJANGO_SUPERUSER_USERNAME`, `DJANGO_SUPERUSER_EMAIL`, `DJANGO_SUPERUSER_PASSWORD` | unset | Used once by `build.sh` on Render to create the first admin. Remove them after the first deploy. |
+
+## Project structure
+
+```
+ration_backend/
+├── manage.py                     Django command-line entry point
+├── requirements.txt              Python dependencies
+├── build.sh                      Render build: install, collect static files, migrate
+├── render.yaml                   Render blueprint: web service + Postgres database
+├── .env.example                  Template for local settings
+├── .python-version               Python version used on Render and in CI
+├── .github/workflows/deploy.yml  Tests on Postgres, then triggers a Render deploy
+│
+├── config/                       Project settings
+│   ├── settings.py               Environment-based settings, database, static files, security
+│   ├── urls.py                   Routes: /admin/, accounts and core
+│   ├── wsgi.py / asgi.py         Server entry points (gunicorn uses wsgi.py)
+│
+├── accounts/                     Users and login
+│   ├── models.py                 Custom User: email, full name, role and the role rules
+│   ├── admin.py                  Admin pages for creating and editing users
+│   ├── forms.py / views.py       Email + password login, logout
+│   ├── templates/accounts/       Login page and its layout
+│   ├── migrations/
+│   └── tests.py
+│
+└── core/                         Projects, mixes, materials and prices
+    ├── models.py                 Project, ProjectBlock, Material, MixRatio, MixIngredient,
+    │                             MaterialPrice, ProjectEstimate, EstimateMaterial, ProjectApproval
+    ├── services.py               Cost calculation, price lookup, saving estimate snapshots
+    ├── views.py                  All pages and actions, with role and status checks
+    ├── forms.py                  Project, mix (fixed materials), material and price forms
+    ├── permissions.py            manager_required, price_reviewer_required, ...
+    ├── urls.py                   /projects/..., /config/...
+    ├── admin.py                  Admin pages for the core tables
+    ├── templatetags/ration.py    money, measure, recipe bars and material colours
+    ├── management/commands/
+    │   └── load_cape_town_prices.py
+    ├── static/core/ration.css    All styles (navy theme)
+    ├── templates/
+    │   ├── 403.html              "You can't open this page"
+    │   └── core/                 Pages (project list, new, detail, edit, mixes and prices)
+    │                             and partials (files starting with _)
+    ├── migrations/               Tables, starting materials and mixes, data fixes
+    └── tests.py
+```
+
+**Main pages**
+
+| URL | Page |
+|---|---|
+| `/login/` | Log in |
+| `/projects/` | Project list with status filters and search |
+| `/projects/new/` | Create a project (managers) |
+| `/projects/<id>/` | Project costs, mix comparison, prices and status |
+| `/projects/<id>/edit/` | Edit a draft project (managers) |
+| `/config/` | Mixes, materials, default prices and price review |
+| `/config/mixes/new/`, `/config/mixes/<id>/` | Create or edit a mix |
+| `/admin/` | Django admin (superusers) |
+
+## How costs are calculated
+
+For each block line of a project and each active mix that suits its block type:
+
+1. **Batches** = block count ÷ blocks per batch, rounded up.
+2. **Material quantity** = quantity per batch × batches (wheelbarrows of sand and stone, bags of cement).
+3. **Unit price** = the latest approved project price for that material, otherwise the latest approved default price. A price per m³ is divided by 16 to get the price per wheelbarrow.
+4. **Mix total** = sum of quantity × unit price. **Cost per block** = mix total ÷ blocks made.
+
+The project total is the sum of the chosen mix for every block line. It appears once every block type has a chosen mix and all its materials have approved prices.
+
+## Tests
+
+```bash
+python manage.py test
+```
+
+To run the tests the same way CI does, against Postgres with production settings:
+
+```bash
+docker run -d --rm --name ration-pg -e POSTGRES_USER=ration -e POSTGRES_PASSWORD=ration -e POSTGRES_DB=ration -p 5432:5432 postgres:16
+```
+
+```bash
+DATABASE_URL=postgres://ration:ration@localhost:5432/ration DJANGO_DEBUG=false DJANGO_SECRET_KEY=local-test-secret-key-long-enough-to-pass-checks DJANGO_SECURE_SSL_REDIRECT=false python manage.py collectstatic --no-input && DATABASE_URL=postgres://ration:ration@localhost:5432/ration DJANGO_DEBUG=false DJANGO_SECRET_KEY=local-test-secret-key-long-enough-to-pass-checks DJANGO_SECURE_SSL_REDIRECT=false python manage.py test
+```
+
+```bash
+docker stop ration-pg
+```
+
+## Deployment (Render + GitHub Actions)
+
+The app is deployed to [Render](https://render.com). GitHub Pages can't host it, because it needs a Python server and a database.
+
+**One-time setup**
+
+1. In Render, choose **New → Blueprint** and select this repository. Render reads `render.yaml` and creates the `ration` web service and the `ration-db` Postgres database. It also generates `DJANGO_SECRET_KEY` and connects `DATABASE_URL`.
+2. In Render, open **ration → Settings → Deploy Hook** and copy the URL.
+3. In GitHub, open **Settings → Secrets and variables → Actions** and add it as the secret `RENDER_DEPLOY_HOOK_URL`.
+4. To create the first admin online, set `DJANGO_SUPERUSER_USERNAME`, `DJANGO_SUPERUSER_EMAIL` and `DJANGO_SUPERUSER_PASSWORD` on the Render service, deploy once, then delete them.
+
+**Every push to `main`**
+
+The workflow in `.github/workflows/deploy.yml`:
+
+1. Runs the tests against a temporary Postgres 16 with production settings, after checking for missing migrations and collecting static files.
+2. If they pass, calls the Render deploy hook.
+3. Render then runs `build.sh` (install, `collectstatic`, `migrate`) and starts `gunicorn config.wsgi:application`.
+
+Pull requests run the tests only.
+
+**Limits of the free plan**
+
+- The web service sleeps when unused, so the first visit afterwards takes about a minute.
+- The free Postgres database expires after 30 days unless upgraded.
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `ImproperlyConfigured: Set DJANGO_SECRET_KEY` | Create `.env` from `.env.example` (sets `DJANGO_DEBUG=true`), or set `DJANGO_SECRET_KEY`. |
+| Styles look old after an update | Hard-refresh the page (Ctrl+Shift+R). |
+| A project shows no total | Choose a mix for every block type, and make sure every material in those mixes has an approved price. |
+| "You can't open this page" | Your role doesn't allow that page. An administrator can change your role in `/admin/`. |
+| `git push` asks for a password | GitHub needs a personal access token or `gh auth login`, not your account password. |
+| `load_cape_town_prices` says no user | Create the user first (`createsuperuser` or `/admin/`), then pass that user's email. |
