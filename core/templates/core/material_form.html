@@ -13,6 +13,7 @@
 <form method="post" novalidate class="narrow">
   {% csrf_token %}
   {% include "core/_field.html" with field=form.name %}
+  {% include "core/_field.html" with field=form.tonnes_per_unit help="Weight of one "|add:material.base_unit|add:" in tonnes, so quantities and prices show per tonne. 1 m³ = 16 wheelbarrows; sand weighs about 1.6 t per m³ (0.1 t a wheelbarrow)." %}
   {% include "core/_field.html" with field=form.is_active help="Unavailable materials can't be picked for new mixes or prices. Existing mixes keep them." %}
   <div class="actions">
     <button type="submit" class="btn" data-busy-label="Saving…">Save material</button>

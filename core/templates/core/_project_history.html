@@ -21,7 +21,7 @@
 
 {% if final.breakdown %}
 <section class="section" aria-labelledby="final-mixes">
-  <div class="section-head"><h2 id="final-mixes">Mixes used</h2></div>
+  <div class="section-head"><h2 id="final-mixes">Mixture used</h2></div>
   <div class="table-wrap">
     <table class="table">
       <thead>
@@ -61,13 +61,21 @@
   {% if final_materials %}
   <div class="table-wrap">
     <table class="table">
-      <thead><tr><th scope="col">Material</th><th scope="col" class="num">Quantity</th><th scope="col" class="num">Unit price</th><th scope="col" class="num">Subtotal</th></tr></thead>
+      <thead><tr><th scope="col">Material</th><th scope="col" class="num">Needed</th><th scope="col" class="num">Price</th><th scope="col" class="num">Subtotal</th></tr></thead>
       <tbody>
         {% for row in final_materials %}
         <tr>
           <td><span class="swatch tone-{{ row.material|material_tone }}"></span>{{ row.material.name }}</td>
-          <td class="num">{{ row.quantity_required|measure:row.unit }}</td>
-          <td class="num">{{ row.unit_price_snapshot|money:final.currency }} <span class="muted small">per {{ row.unit }}</span></td>
+          {% with t=row.material|tonnes_of:row.quantity_required ppt=row.material|per_tonne_of:row.unit_price_snapshot %}
+          <td class="num">
+            {% if t is not None %}<strong>{{ t|tonnes }}</strong><div class="muted small">{{ row.quantity_required|measure:row.unit }}</div>
+            {% else %}{{ row.quantity_required|measure:row.unit }}{% endif %}
+          </td>
+          <td class="num">
+            {% if ppt is not None %}{{ ppt|money:final.currency }} <span class="muted small">/ t</span>
+            {% else %}{{ row.unit_price_snapshot|money:final.currency }} <span class="muted small">/ {{ row.unit }}</span>{% endif %}
+          </td>
+          {% endwith %}
           <td class="num">{{ row.subtotal|money:final.currency }}</td>
         </tr>
         {% endfor %}

@@ -1,6 +1,6 @@
 # Ration
 
-Ration is a web app for concrete block yards. A manager enters how many full and half blocks a job needs, compares what every mix ratio (sand, stone and cement per batch) would cost with approved material prices, chooses a mix, and sends the project to an accountant for approval. Completed projects are saved as history with the prices that were used.
+Ration is a web app for concrete block yards. A manager enters how many full and half blocks a job needs, sees what each mixture (sand, stone and cement per batch) would need in tonnes and cost for the whole project, chooses one, adjusts the project's prices if needed, and sends it to an accountant for approval. Completed projects are saved as history with the prices that were used.
 
 Built with Django 6.1 and server-rendered templates. It runs on SQLite locally and on Postgres in production (Render).
 
@@ -23,7 +23,7 @@ Built with Django 6.1 and server-rendered templates. It runs on SQLite locally a
 
 | Role | Can do |
 |---|---|
-| Manager | Create, edit and delete projects (while they're drafts), choose a mix per block type, add mixes, materials and prices, move projects through their statuses. |
+| Manager | Create, edit and delete projects (while they're drafts), choose the project's mixture, set the project's material prices (drafts and pending projects), add mixes, materials and default prices, move projects through their statuses. |
 | Accountant | Approve or decline material prices (optionally replacing a wrong price), approve or decline projects that are waiting for approval. |
 | Creator | Read approved and completed projects only. |
 | Superuser | Everything, plus the Django admin at `/admin/`. |
@@ -41,13 +41,14 @@ Draft ──Send for approval──▶ Pending ──Approve (accountant)──�
 - **Draft**: everything can be edited.
 - **Pending**: only the project's material prices can change. The manager moves it back to draft to edit anything else.
 - **Approved**: nothing can be edited. Visible to creators.
-- **Completed**: the total, the mixes and the prices are saved as a snapshot and the project is locked for good.
+- **Completed**: the total, the mixture and the prices are saved as a snapshot and the project is locked for good.
 
 **Prices**
 
-- Default prices apply to every project. A project can have its own prices that replace the defaults for that project only.
-- Every new price waits for an accountant. Only approved prices are used in calculations.
-- Prices can be entered per unit (wheelbarrow, bag) or per cubic metre for sand and stone (divided by 16 wheelbarrows).
+- **Default prices** apply to every project. They're added on **Mixes and prices** and wait for an accountant's approval before they're used.
+- **Project prices** are set by the manager on the project page and apply to that project only. They're used straight away; the accountant checks them when approving the project and can decline it with a comment such as "the sand price is too high".
+- Quantities and prices are shown **per tonne**, with wheelbarrows and bags as a smaller second line for the people mixing on site. Each material has a weight per unit (starting values: sand 0.100 t and stone 0.090 t per wheelbarrow, cement 0.050 t per bag), editable on its material page.
+- Default prices can be entered per tonne, per unit (wheelbarrow, bag) or per cubic metre for sand and stone (1 m³ = 16 wheelbarrows).
 
 ## Requirements
 
@@ -89,7 +90,7 @@ Create the first admin account (you'll be asked for a username, email and passwo
 python manage.py createsuperuser
 ```
 
-Optional: load the sample Cape Town prices (sand R 16.43 and stone R 21.75 per wheelbarrow, cement R 85.00 per bag) as approved prices, recorded under an existing user's email:
+Optional: load the sample Cape Town prices (sand R 16.43 and stone R 21.75 per wheelbarrow, cement R 85.00 per bag, which is R 164.30, R 241.67 and R 1,700.00 per tonne) as approved prices, recorded under an existing user's email:
 
 ```bash
 python manage.py load_cape_town_prices admin@example.com
@@ -106,7 +107,7 @@ Open http://localhost:8000 and log in with the email and password of the account
 First steps after logging in as the superuser:
 
 1. Go to http://localhost:8000/admin/ → **Users** and create a manager and an accountant (or give your own account a role).
-2. As a manager, open **New project**, enter the block counts and choose a mix for each block type.
+2. As a manager, open **New project**, enter the block counts and pick one of the mixtures. Each mixture shows the tonnes of each material and the total for the project as you type.
 3. Click **Send for approval**. As an accountant, open the project and click **Approve**.
 4. As a manager, click **Mark completed** to save the project as history.
 
@@ -156,7 +157,7 @@ ration_backend/
     │                             MaterialPrice, ProjectEstimate, EstimateMaterial, ProjectApproval
     ├── services.py               Cost calculation, price lookup, saving estimate snapshots
     ├── views.py                  All pages and actions, with role and status checks
-    ├── forms.py                  Project, mix (fixed materials), material and price forms
+    ├── forms.py                  Project (with mixture), mix (fixed materials), material and price forms
     ├── permissions.py            manager_required, price_reviewer_required, ...
     ├── urls.py                   /projects/..., /config/...
     ├── admin.py                  Admin pages for the core tables
@@ -166,7 +167,8 @@ ration_backend/
     ├── static/core/ration.css    All styles (navy theme)
     ├── templates/
     │   ├── 403.html              "You can't open this page"
-    │   └── core/                 Pages (project list, new, detail, edit, mixes and prices)
+    │   └── core/                 Pages (project list, project form for new/edit, project detail,
+    │                             mixes and prices)
     │                             and partials (files starting with _)
     ├── migrations/               Tables, starting materials and mixes, data fixes
     └── tests.py
@@ -179,7 +181,7 @@ ration_backend/
 | `/login/` | Log in |
 | `/projects/` | Project list with status filters and search |
 | `/projects/new/` | Create a project (managers) |
-| `/projects/<id>/` | Project costs, mix comparison, prices and status |
+| `/projects/<id>/` | Project total, mixture, materials in tonnes, project prices and status |
 | `/projects/<id>/edit/` | Edit a draft project (managers) |
 | `/config/` | Mixes, materials, default prices and price review |
 | `/config/mixes/new/`, `/config/mixes/<id>/` | Create or edit a mix |
@@ -187,14 +189,13 @@ ration_backend/
 
 ## How costs are calculated
 
-For each block line of a project and each active mix that suits its block type:
+A project uses one mixture for all its blocks. A mixture marked "both" can be used for any project; a half-only or full-only mixture only for projects with just that kind of block.
 
-1. **Batches** = block count ÷ blocks per batch, rounded up.
-2. **Material quantity** = quantity per batch × batches (wheelbarrows of sand and stone, bags of cement).
-3. **Unit price** = the latest approved project price for that material, otherwise the latest approved default price. A price per m³ is divided by 16 to get the price per wheelbarrow.
-4. **Mix total** = sum of quantity × unit price. **Cost per block** = mix total ÷ blocks made.
-
-The project total is the sum of the chosen mix for every block line. It appears once every block type has a chosen mix and all its materials have approved prices.
+1. **Batches** = block count ÷ blocks per batch, rounded up, separately for full and half blocks.
+2. **Material quantity** = quantity per batch × batches, in the material's own unit (wheelbarrows of sand and stone, bags of cement), added up for full and half blocks.
+3. **Tonnes** = quantity × the material's tonnes per unit.
+4. **Unit price** = the project's own price for that material if it has one, otherwise the latest approved default price. A price per tonne is multiplied by the tonnes per unit, and a price per m³ is divided by 16 for a wheelbarrow.
+5. **Total** = sum of quantity × unit price for every material. **Cost per block** = total ÷ blocks.
 
 ## Tests
 
@@ -248,7 +249,7 @@ Pull requests run the tests only.
 |---|---|
 | `ImproperlyConfigured: Set DJANGO_SECRET_KEY` | Create `.env` from `.env.example` (sets `DJANGO_DEBUG=true`), or set `DJANGO_SECRET_KEY`. |
 | Styles look old after an update | Hard-refresh the page (Ctrl+Shift+R). |
-| A project shows no total | Choose a mix for every block type, and make sure every material in those mixes has an approved price. |
+| A project shows no total | Choose a mixture, and make sure every material in it has a price (a default price or a project price). |
 | "You can't open this page" | Your role doesn't allow that page. An administrator can change your role in `/admin/`. |
 | `git push` asks for a password | GitHub needs a personal access token or `gh auth login`, not your account password. |
 | `load_cape_town_prices` says no user | Create the user first (`createsuperuser` or `/admin/`), then pass that user's email. |

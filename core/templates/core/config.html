@@ -67,7 +67,7 @@
     {% if materials %}
     <div class="table-wrap">
       <table class="table">
-        <thead><tr><th scope="col">Material</th><th scope="col" class="hide-sm">Measured in</th><th scope="col" class="num">Default price</th></tr></thead>
+        <thead><tr><th scope="col">Material</th><th scope="col" class="hide-sm">Measured in</th><th scope="col" class="num hide-sm">Weight</th><th scope="col" class="num">Default price</th></tr></thead>
         <tbody>
           {% for material in materials %}
           <tr{% if not material.is_active %} class="is-inactive"{% endif %}>
@@ -76,9 +76,11 @@
               {% if not material.is_active %}<div class="small muted">Unavailable</div>{% endif %}
             </td>
             <td class="muted hide-sm">{{ material.base_unit }}s</td>
+            <td class="num muted hide-sm">{% if material.tonnes_per_unit %}{{ material.tonnes_per_unit|floatformat:"-3" }} t per {{ material.base_unit }}{% else %}<span title="Set it so quantities show in tonnes">Not set</span>{% endif %}</td>
             <td class="num">
               {% if material.current_price %}
-                {{ material.current_unit_price|money:material.current_price.currency }} <span class="muted small">per {{ material.base_unit }}</span>
+                {% if material.current_tonne_price is not None %}{{ material.current_tonne_price|money:material.current_price.currency }} <span class="muted small">/ t</span>
+                {% else %}{{ material.current_unit_price|money:material.current_price.currency }} <span class="muted small">/ {{ material.base_unit }}</span>{% endif %}
               {% else %}<span class="status status-pending">No approved price</span>{% endif %}
             </td>
           </tr>
@@ -111,6 +113,7 @@
       <div class="form-grid">
         {% include "core/_field.html" with field=material_form.name %}
         {% include "core/_field.html" with field=material_form.base_unit %}
+        {% include "core/_field.html" with field=material_form.tonnes_per_unit help="Weight of one unit, e.g. 0.1 for a wheelbarrow of sand." %}
       </div>
       <div class="field"><button type="submit" class="btn btn-quiet btn-small">Add material</button></div>
     </form>

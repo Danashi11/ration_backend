@@ -8,7 +8,7 @@
     {% if project.is_locked %}
     <p class="muted">Completed on {{ project.completed_at|date:"j M Y" }}. This project is kept as history and can't be edited, re-priced or deleted.</p>
     {% elif project.status == 'draft' %}
-    <p class="muted">The manager can edit everything. Send it for approval when the mixes are chosen.</p>
+    <p class="muted">The manager can edit everything. Send it for approval when the mixture and prices are right.</p>
     {% elif project.status == 'pending' %}
     <p class="muted">Waiting for an accountant. Only material prices can change; moving it back to draft unlocks the rest.</p>
     {% elif project.status == 'approved' %}
@@ -24,7 +24,7 @@
     {% if estimate.total is not None %}
     <p class="muted small">Total to approve: <strong class="review-total">{{ estimate.total|money:estimate.currency }}</strong></p>
     {% else %}
-    <p class="muted small">This project can't be approved yet: some materials in its mixes have no approved price.</p>
+    <p class="muted small">This project can't be approved yet: some materials in its mixture have no price.</p>
     {% endif %}
     <form method="post" action="{% url 'project_review' project.pk %}" novalidate>
       {% csrf_token %}

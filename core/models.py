@@ -38,6 +38,8 @@ class Project(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     completed_at = models.DateTimeField(null=True, blank=True)
+    # The one mixture used for every block in the project.
+    mix = models.ForeignKey('MixRatio', on_delete=models.PROTECT, null=True, blank=True, related_name='projects')
 
     class Meta:
         db_table = 'projects'
@@ -73,9 +75,6 @@ class ProjectBlock(models.Model):
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='blocks')
     block_type = models.CharField(max_length=1, choices=BlockType.choices)
     quantity = models.PositiveIntegerField()
-    required_strength_mpa = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
-    # The mix the manager chose for this line; empty until they choose.
-    mix = models.ForeignKey('MixRatio', on_delete=models.SET_NULL, null=True, blank=True, related_name='project_blocks')
 
     class Meta:
         db_table = 'project_blocks'
@@ -91,6 +90,8 @@ class ProjectBlock(models.Model):
 class Material(models.Model):
     name = models.CharField(max_length=100, unique=True)
     base_unit = models.CharField(max_length=20)
+    # Weight of one base unit (one wheelbarrow, one bag) so quantities and prices show in tonnes.
+    tonnes_per_unit = models.DecimalField(max_digits=8, decimal_places=4, null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
     class Meta:
@@ -98,6 +99,9 @@ class Material(models.Model):
 
     def __str__(self):
         return self.name
+
+    def to_tonnes(self, quantity):
+        return quantity * self.tonnes_per_unit if self.tonnes_per_unit else None
 
 
 class MixRatio(models.Model):

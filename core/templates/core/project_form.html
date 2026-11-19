@@ -1,0 +1,176 @@
+{% extends "core/base.html" %}
+{% load ration %}
+
+{% block title %}{% if project %}Edit {{ project.name }}{% else %}New project{% endif %} · Ration{% endblock %}
+
+{% block content %}
+{% if project %}<a href="{% url 'project_detail' project.pk %}" class="back">Back to {{ project.name }}</a>{% endif %}
+
+<div class="page-head">
+  <h1 class="display">{% if project %}Edit project{% else %}New project{% endif %}</h1>
+  <p class="lede">Enter the blocks the job needs, then pick the mixture. Each mixture shows the materials and the price for the whole project.</p>
+</div>
+
+<form method="post" novalidate class="project-form" id="project-form">
+  {% csrf_token %}
+  {% for error in form.non_field_errors %}<div class="notice notice-error" role="alert">{{ error }}</div>{% endfor %}
+
+  <section class="form-step" aria-labelledby="step-details">
+    <h2 id="step-details"><span class="step-number" aria-hidden="true">1</span>Project and blocks</h2>
+    <div class="form-step-body">
+      <div class="quantities">
+        {% include "core/_quantity.html" with field=form.full_quantity label="Full blocks" autofocus=True %}
+        {% include "core/_quantity.html" with field=form.half_quantity label="Half blocks" %}
+      </div>
+      <div class="form-grid">
+        {% include "core/_field.html" with field=form.name %}
+        {% include "core/_field.html" with field=form.description %}
+      </div>
+    </div>
+  </section>
+
+  <section class="form-step" aria-labelledby="step-mix">
+    <h2 id="step-mix"><span class="step-number" aria-hidden="true">2</span>Mixture</h2>
+    <div class="form-step-body">
+      {% for error in form.mix.errors %}<div class="notice notice-error" role="alert">{{ error }}</div>{% endfor %}
+      {% if mixes %}
+      <div class="mix-options" role="radiogroup" aria-labelledby="step-mix">
+        {% for mix in mixes %}
+        {% recipe_segments mix as segments %}
+        <label class="mix-option" data-mix="{{ mix.pk }}" data-block-type="{{ mix.block_type }}">
+          <input type="radio" name="{{ form.mix.html_name }}" value="{{ mix.pk }}" class="visually-hidden"
+                 {% if form.mix.value|stringformat:"s" == mix.pk|stringformat:"s" %}checked{% endif %}>
+          <span class="mix-option-head">
+            <span class="mix-option-name">{{ mix.name }}</span>
+            <span class="mix-option-check" aria-hidden="true"></span>
+          </span>
+          <span class="mix-option-meta">
+            {{ mix.blocks_per_batch }} blocks a batch{% if mix.strength_mpa %}, {{ mix.strength_mpa|floatformat:"-2" }} MPa{% endif %}{% if mix.block_type != 'B' %}, {{ mix.get_block_type_display|lower }} blocks only{% endif %}
+          </span>
+          {% if segments %}
+          <span class="recipe" aria-hidden="true">{% for seg in segments %}<span class="recipe-seg tone-{{ seg.tone }}" style="flex: {{ seg.percent }}"></span>{% endfor %}</span>
+          {% endif %}
+          <span class="mix-option-materials">
+            {% for ingredient in mix.ingredients.all|in_recipe_order %}
+            <span class="mix-material" data-material="{{ ingredient.material_id }}">
+              <span class="mix-material-name"><span class="swatch tone-{{ ingredient.material|material_tone }}"></span>{{ ingredient.material.name }}</span>
+              <span class="mix-material-qty"><strong data-role="tonnes">—</strong><small data-role="units"></small></span>
+            </span>
+            {% endfor %}
+          </span>
+          <span class="mix-option-total">
+            <span class="mix-option-total-label">Total for the project</span>
+            <strong data-role="total">—</strong>
+            <small data-role="per-block"></small>
+          </span>
+          <span class="mix-option-note" data-role="note"></span>
+        </label>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="empty">No active mixtures yet. <a href="{% url 'mix_new' %}">Add a mixture</a> first.</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <div class="form-submit">
+    <button type="submit" class="btn btn-lg" data-busy-label="Saving…">{% if project %}Save project{% else %}Create project{% endif %}</button>
+    {% if project %}<a href="{% url 'project_detail' project.pk %}" class="btn btn-quiet btn-lg">Cancel</a>{% endif %}
+    <span class="field-help">Prices come from the approved default prices{% if project %} and this project's own prices{% endif %}. You can change them on the project page.</span>
+  </div>
+</form>
+
+{% if project and project.is_editable %}
+<section class="section danger-zone" aria-labelledby="delete-project">
+  <div class="section-head"><h2 id="delete-project">Delete this project</h2></div>
+  <p class="muted">The project and its block counts are removed for everyone. This can't be undone.</p>
+  <form method="post" action="{% url 'project_delete' project.pk %}" data-confirm="Delete &quot;{{ project.name }}&quot;? This can't be undone.">
+    {% csrf_token %}
+    <button type="submit" class="btn btn-danger">Delete project</button>
+  </form>
+</section>
+{% endif %}
+
+{{ pricing|json_script:"pricing-data" }}
+<script>
+(function () {
+  var data = JSON.parse(document.getElementById('pricing-data').textContent);
+  var materials = {};
+  data.materials.forEach(function (m) { materials[m.id] = m; });
+  var mixes = {};
+  data.mixes.forEach(function (m) { mixes[m.id] = m; });
+  var form = document.getElementById('project-form');
+  var full = form.querySelector('[name="full_quantity"]');
+  var half = form.querySelector('[name="half_quantity"]');
+
+  function money(value, currency) {
+    var symbol = !currency || currency === 'ZAR' ? 'R' : currency;
+    return symbol + ' ' + value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  function units(value, unit) {
+    var text = (Math.round(value * 100) / 100).toLocaleString('en-US');
+    return text + ' ' + unit + (value === 1 || /s$/.test(unit) ? '' : 's');
+  }
+  function count(input) {
+    var n = parseInt(input.value, 10);
+    return isNaN(n) || n < 0 ? 0 : n;
+  }
+
+  function update() {
+    var quantities = { F: count(full), H: count(half) };
+    var types = Object.keys(quantities).filter(function (t) { return quantities[t] > 0; });
+
+    form.querySelectorAll('.mix-option').forEach(function (card) {
+      var mix = mixes[card.dataset.mix];
+      var radio = card.querySelector('input');
+      var note = card.querySelector('[data-role="note"]');
+      var fits = mix.block_type === 'B' || (types.length > 0 && types.every(function (t) { return t === mix.block_type; }));
+      card.classList.toggle('is-unavailable', !fits);
+      radio.disabled = !fits;
+      if (!fits && radio.checked) radio.checked = false;
+
+      var needed = {};
+      var blocks = 0;
+      types.forEach(function (t) {
+        var batches = Math.ceil(quantities[t] / mix.blocks_per_batch);
+        blocks += quantities[t];
+        mix.ingredients.forEach(function (i) { needed[i.material] = (needed[i.material] || 0) + i.quantity * batches; });
+      });
+
+      var total = 0, missing = [], currency = null;
+      mix.ingredients.forEach(function (i) {
+        var material = materials[i.material];
+        var amount = needed[i.material] || 0;
+        var row = card.querySelector('[data-material="' + i.material + '"]');
+        var tonnes = material.tonnes_per_unit ? amount * material.tonnes_per_unit : null;
+        row.querySelector('[data-role="tonnes"]').textContent = !types.length ? '—'
+          : tonnes !== null ? tonnes.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' t'
+          : units(amount, material.unit);
+        row.querySelector('[data-role="units"]').textContent = types.length && tonnes !== null ? units(amount, material.unit) : '';
+        if (material.unit_price === null) { missing.push(material.name); }
+        else { total += Math.round(amount * material.unit_price * 100) / 100; currency = material.currency; }
+      });
+
+      var totalEl = card.querySelector('[data-role="total"]');
+      var perBlock = card.querySelector('[data-role="per-block"]');
+      if (!fits) {
+        totalEl.textContent = '—'; perBlock.textContent = '';
+        note.textContent = 'Only for ' + (mix.block_type === 'F' ? 'full' : 'half') + ' blocks.';
+      } else if (!types.length) {
+        totalEl.textContent = '—'; perBlock.textContent = ''; note.textContent = 'Enter the number of blocks.';
+      } else if (missing.length) {
+        totalEl.textContent = '—'; perBlock.textContent = '';
+        note.textContent = 'No price yet for ' + missing.join(', ') + '.';
+      } else {
+        totalEl.textContent = money(total, currency);
+        perBlock.textContent = money(total / blocks, currency) + ' a block';
+        note.textContent = '';
+      }
+    });
+  }
+
+  [full, half].forEach(function (input) { input.addEventListener('input', update); });
+  update();
+})();
+</script>
+{% endblock %}

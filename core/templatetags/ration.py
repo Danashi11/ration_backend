@@ -21,10 +21,25 @@ def material_tone(material):
     return EXTRA_TONES[material.pk % len(EXTRA_TONES)]
 
 
+def recipe_rank(material):
+    """Sand, stone, cement first, as on the mix ratio sheet; anything else after, by name."""
+    name = material.name.lower()
+    rank = next((i for i, word in enumerate(TONES) if word in name), len(TONES))
+    return rank, name
+
+
+@register.filter
+def in_recipe_order(rows):
+    """Sort ingredients or material rows (anything with .material or ['material']) sand, stone, cement."""
+    def material_of(row):
+        return row['material'] if isinstance(row, dict) else row.material
+    return sorted(rows, key=lambda row: recipe_rank(material_of(row)))
+
+
 @register.simple_tag
 def recipe_segments(mix):
     """Ingredients of a mix with their share of the batch in measures (wheelbarrows/pockets)."""
-    ingredients = list(mix.ingredients.all())
+    ingredients = sorted(mix.ingredients.all(), key=lambda i: recipe_rank(i.material))
     total = sum((i.quantity for i in ingredients), Decimal('0'))
     if not total:
         return []
@@ -62,7 +77,7 @@ def money(value, currency='ZAR'):
 
 @register.filter
 def unit_label(unit):
-    return 'm³' if unit == 'm3' else unit
+    return {'m3': 'm³', 't': 'tonne'}.get(unit, unit)
 
 
 @register.filter
@@ -72,3 +87,25 @@ def measure(quantity, unit):
     if quantity != 1 and unit and not unit.endswith('s'):
         unit = f'{unit}s'
     return f'{text} {unit}'
+
+
+@register.filter
+def tonnes(value):
+    """'8.75 t' from a Decimal number of tonnes."""
+    if value is None:
+        return ''
+    return f'{value:,.2f} t'
+
+
+@register.filter
+def tonnes_of(material, quantity):
+    """Tonnes for a quantity in the material's own unit, or None when its weight isn't set."""
+    return material.to_tonnes(quantity) if quantity is not None else None
+
+
+@register.filter
+def per_tonne_of(material, unit_price):
+    """Price per tonne from a price per unit, or None when the material's weight isn't set."""
+    if unit_price is None or not material.tonnes_per_unit:
+        return None
+    return (unit_price / material.tonnes_per_unit).quantize(Decimal('0.01'))

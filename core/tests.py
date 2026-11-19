@@ -7,7 +7,7 @@ from django.utils import timezone
 from accounts.models import User
 
 from .models import Material, MaterialPrice, MixRatio, Project, ProjectBlock
-from .services import estimate_block, estimate_project, latest_approved_prices
+from .services import cost_mix, estimate_project, latest_approved_prices, mix_fits, pricing_data
 
 
 class BaseTestCase(TestCase):
@@ -32,81 +32,133 @@ class BaseTestCase(TestCase):
 
 
 class EstimateTests(BaseTestCase):
-    def options_for(self, quantity, block_type='F'):
-        project = Project.objects.create(name='Test', created_by=self.user)
-        block = ProjectBlock.objects.create(project=project, block_type=block_type, quantity=quantity)
-        return {o['mix'].name: o for o in estimate_block(block)}
+    def cost(self, mix_name, **quantities):
+        mix = MixRatio.objects.prefetch_related('ingredients__material').get(name=mix_name)
+        return cost_mix(mix, quantities, latest_approved_prices())
+
+    def material_row(self, result, name):
+        return next(m for m in result['materials'] if m['material'].name == name)
 
     def test_cost_per_block_for_seeded_batches(self):
         self.load_cape_town_prices()
-        options = self.options_for(70)
-        # Batch 1: (3 x 16.43 + 85) / 22
-        self.assertEqual(options['Batch 1']['cost_per_block'], Decimal('6.10'))
-        # Batch 2: (3 x 16.43 + 2 x 21.75 + 85) / 35
-        self.assertEqual(options['Batch 2']['cost_per_block'], Decimal('5.08'))
-        self.assertEqual(options['Batch 3']['cost_per_block'], Decimal('5.16'))
-        self.assertEqual(options['Batch 4 (optimum)']['cost_per_block'], Decimal('5.76'))
+        # Batch 1: (3 x 16.43 + 85) / 22; Batch 2: (3 x 16.43 + 2 x 21.75 + 85) / 35
+        self.assertEqual(self.cost('Batch 1', F=22)['cost_per_block'], Decimal('6.10'))
+        self.assertEqual(self.cost('Batch 2', F=35)['cost_per_block'], Decimal('5.08'))
+        self.assertEqual(self.cost('Batch 3', F=35)['cost_per_block'], Decimal('5.16'))
+        self.assertEqual(self.cost('Batch 4 (optimum)', F=28)['cost_per_block'], Decimal('5.76'))
 
     def test_batches_round_up(self):
         self.load_cape_town_prices()
-        option = self.options_for(70)['Batch 4 (optimum)']
-        self.assertEqual(option['batches'], 3)  # 70 / 28 -> 3 batches
-        self.assertEqual(option['blocks_produced'], 84)
-        self.assertEqual(option['total'], Decimal('484.08'))  # 3 x 161.36
+        result = self.cost('Batch 4 (optimum)', F=70)
+        self.assertEqual(result['lines'][0]['batches'], 3)  # 70 / 28 -> 3 batches
+        self.assertEqual(result['lines'][0]['blocks_produced'], 84)
+        self.assertEqual(result['total'], Decimal('484.08'))  # 3 x 161.36
 
-    def test_cheapest_is_flagged(self):
+    def test_full_and_half_blocks_share_one_mixture(self):
         self.load_cape_town_prices()
-        options = self.options_for(35)
-        self.assertTrue(options['Batch 2'].get('cheapest'))
+        result = self.cost('Batch 2', F=70, H=35)
+        self.assertEqual([(l['block_type'], l['batches']) for l in result['lines']], [('F', 2), ('H', 1)])
+        self.assertEqual(result['total'], Decimal('533.37'))  # 3 batches x 177.79
+        self.assertEqual(self.material_row(result, 'Sand')['quantity'], Decimal('9'))
+
+    def test_quantities_and_prices_in_tonnes(self):
+        self.load_cape_town_prices()
+        result = self.cost('Batch 4 (optimum)', F=70)
+        sand = self.material_row(result, 'Sand')
+        cement = self.material_row(result, 'Cement 50kg')
+        self.assertEqual(sand['tonnes'], Decimal('0.6'))  # 6 wheelbarrows x 0.1 t
+        self.assertEqual(sand['price_per_tonne'], Decimal('164.30'))  # 16.43 / 0.1
+        self.assertEqual(cement['tonnes'], Decimal('0.15'))  # 3 bags x 0.05 t
+        self.assertEqual(cement['price_per_tonne'], Decimal('1700.00'))
+
+    def test_price_per_tonne_is_converted_to_units(self):
+        self.approve_price('Sand', '164.30', unit='t')
+        self.approve_price('Cement 50kg', '85.00')
+        self.assertEqual(self.cost('Batch 1', F=22)['total'], Decimal('134.29'))
+
+    def test_material_without_weight_shows_units_only(self):
+        self.load_cape_town_prices()
+        Material.objects.filter(name='Sand').update(tonnes_per_unit=None)
+        sand = self.material_row(self.cost('Batch 1', F=22), 'Sand')
+        self.assertIsNone(sand['tonnes'])
+        self.assertIsNone(sand['price_per_tonne'])
 
     def test_pending_price_is_not_used(self):
         self.approve_price('Sand', '16.43')
-        self.approve_price('Stone 13mm', '21.75')
         MaterialPrice.objects.create(
-            material=Material.objects.get(name='Cement 50kg'), price=Decimal('85'), unit='bag',
-            created_by=self.user,
+            material=Material.objects.get(name='Cement 50kg'), price=Decimal('85'), unit='bag', created_by=self.user,
         )
-        option = self.options_for(22)['Batch 1']
-        self.assertIsNone(option['total'])
-        self.assertEqual(option['missing_prices'], ['Cement 50kg'])
+        result = self.cost('Batch 1', F=22)
+        self.assertIsNone(result['total'])
+        self.assertEqual(result['missing'], ['Cement 50kg'])
 
     def test_cubic_metre_price_is_divided_by_16(self):
         self.approve_price('Sand', '262.88', unit='m3')  # 262.88 / 16 = 16.43
         self.approve_price('Cement 50kg', '85.00')
-        option = self.options_for(22)['Batch 1']
-        self.assertEqual(option['total'], Decimal('134.29'))
+        self.assertEqual(self.cost('Batch 1', F=22)['total'], Decimal('134.29'))
 
-    def test_seeded_mixes_apply_to_half_and_full_blocks(self):
-        self.assertEqual(len(self.options_for(10, block_type='H')), 4)
-        self.assertEqual(len(self.options_for(10, block_type='F')), 4)
+    def test_mixture_must_fit_every_block_type(self):
+        both = MixRatio.objects.get(name='Batch 1')
+        half_only = MixRatio.objects.create(name='Half only', block_type='H', blocks_per_batch=40)
+        self.assertTrue(mix_fits(both, ['F', 'H']))
+        self.assertTrue(mix_fits(half_only, ['H']))
+        self.assertFalse(mix_fits(half_only, ['F']))
+        self.assertFalse(mix_fits(half_only, ['F', 'H']))
 
-    def test_half_only_mix_is_not_offered_for_full_blocks(self):
-        MixRatio.objects.create(name='Half only', block_type='H', blocks_per_batch=40)
-        self.assertIn('Half only', self.options_for(10, block_type='H'))
-        self.assertNotIn('Half only', self.options_for(10, block_type='F'))
+    def test_pricing_data_for_live_totals(self):
+        self.load_cape_town_prices()
+        data = pricing_data()
+        sand = next(m for m in data['materials'] if m['name'] == 'Sand')
+        self.assertEqual((sand['unit_price'], sand['tonnes_per_unit']), (16.43, 0.1))
+        self.assertEqual(len(data['mixes']), 4)
 
 
 class ViewTests(BaseTestCase):
-    def test_create_project_redirects_to_results(self):
-        response = self.client.post(reverse('project_new'), {
-            'name': 'House', 'description': '', 'half_quantity': '0', 'full_quantity': '500',
-        })
+    def project_post(self, **overrides):
+        data = {
+            'name': 'House', 'description': '', 'full_quantity': '500', 'half_quantity': '0',
+            'mix': MixRatio.objects.get(name='Batch 2').pk,
+        }
+        data.update(overrides)
+        return data
+
+    def test_create_project_with_mixture(self):
+        response = self.client.post(reverse('project_new'), self.project_post())
         project = Project.objects.get(name='House')
         self.assertRedirects(response, reverse('project_detail', args=[project.pk]))
+        self.assertEqual(project.mix.name, 'Batch 2')
         self.assertEqual(list(project.blocks.values_list('block_type', 'quantity')), [('F', 500)])
 
-    def test_create_project_requires_blocks(self):
-        response = self.client.post(reverse('project_new'), {'name': 'House', 'half_quantity': '0', 'full_quantity': '0'})
-        self.assertContains(response, 'Enter the number of half or full blocks.')
+    def test_create_project_requires_blocks_and_mixture(self):
+        response = self.client.post(reverse('project_new'), self.project_post(full_quantity='0', mix=''))
+        self.assertContains(response, 'Enter the number of full or half blocks.')
+        self.assertContains(response, 'Choose a mixture.')
         self.assertFalse(Project.objects.exists())
 
-    def test_results_page_shows_prices(self):
+    def test_create_project_rejects_mixture_for_other_block_type(self):
+        half_only = MixRatio.objects.create(name='Half only', block_type='H', blocks_per_batch=40)
+        response = self.client.post(reverse('project_new'), self.project_post(mix=half_only.pk))
+        self.assertContains(response, 'Half only is only for half blocks.')
+        self.assertFalse(Project.objects.exists())
+
+    def test_create_page_has_no_strength_field_and_shows_mixtures(self):
+        response = self.client.get(reverse('project_new'))
+        self.assertNotContains(response, 'Required strength')
+        for name in ('Batch 1', 'Batch 2', 'Batch 3', 'Batch 4 (optimum)'):
+            self.assertContains(response, name)
+        self.assertContains(response, 'id="pricing-data"')
+
+    def test_project_page_shows_tonnes_and_total(self):
         self.load_cape_town_prices()
-        project = Project.objects.create(name='House', created_by=self.user)
+        project = Project.objects.create(name='House', created_by=self.user,
+                                         mix=MixRatio.objects.get(name='Batch 4 (optimum)'))
         ProjectBlock.objects.create(project=project, block_type='F', quantity=70)
         response = self.client.get(reverse('project_detail', args=[project.pk]))
         self.assertContains(response, 'Batch 4 (optimum)')
-        self.assertContains(response, '484.08')
+        self.assertContains(response, 'R 484.08')
+        self.assertContains(response, '0.60 t')
+        self.assertContains(response, '6 wheelbarrows')
+        self.assertContains(response, 'R 164.30')
 
     def mix_post(self, **quantities):
         data = {'name': 'Half mix', 'block_type': 'H', 'strength_mpa': '5', 'blocks_per_batch': '40', 'is_active': 'on'}
@@ -177,7 +229,8 @@ class RoleTests(BaseTestCase):
         return user
 
     def make_project(self, status=Project.Status.DRAFT):
-        project = Project.objects.create(name=f'{status} job', created_by=self.user, status=status)
+        project = Project.objects.create(name=f'{status} job', created_by=self.user, status=status,
+                                         mix=MixRatio.objects.get(name='Batch 2'))
         ProjectBlock.objects.create(project=project, block_type='F', quantity=100)
         return project
 
@@ -238,12 +291,12 @@ class RoleTests(BaseTestCase):
         project = self.make_project()
         response = self.client.post(reverse('project_edit', args=[project.pk]), {
             'name': 'Renamed', 'description': '', 'status': 'completed',
-            'full_quantity': '0', 'half_quantity': '40',
+            'full_quantity': '0', 'half_quantity': '40', 'mix': MixRatio.objects.get(name='Batch 3').pk,
         })
         self.assertRedirects(response, reverse('project_detail', args=[project.pk]))
         project.refresh_from_db()
         # Status is ignored here; it only changes through the status form.
-        self.assertEqual((project.name, project.status), ('Renamed', 'draft'))
+        self.assertEqual((project.name, project.status, project.mix.name), ('Renamed', 'draft', 'Batch 3'))
         self.assertEqual(list(project.blocks.values_list('block_type', 'quantity')), [('H', 40)])
 
     def test_manager_deletes_project(self):
@@ -252,9 +305,21 @@ class RoleTests(BaseTestCase):
         self.assertFalse(Project.objects.filter(pk=project.pk).exists())
 
     def test_manager_deletes_mix(self):
-        mix = MixRatio.objects.first()
+        mix = MixRatio.objects.get(name='Batch 1')
         self.client.post(reverse('mix_delete', args=[mix.pk]))
         self.assertFalse(MixRatio.objects.filter(pk=mix.pk).exists())
+
+    def test_mix_used_by_a_project_cannot_be_deleted(self):
+        self.make_project()
+        mix = MixRatio.objects.get(name='Batch 2')
+        self.client.post(reverse('mix_delete', args=[mix.pk]))
+        self.assertTrue(MixRatio.objects.filter(pk=mix.pk).exists())
+
+    def test_material_weight_can_be_edited(self):
+        sand = Material.objects.get(name='Sand')
+        self.client.post(reverse('material_edit', args=[sand.pk]), {'name': 'Sand', 'tonnes_per_unit': '0.11', 'is_active': 'on'})
+        sand.refresh_from_db()
+        self.assertEqual(sand.tonnes_per_unit, Decimal('0.11'))
 
     def test_used_material_cannot_be_deleted(self):
         sand = Material.objects.get(name='Sand')
@@ -306,136 +371,77 @@ class RoleTests(BaseTestCase):
         self.assertEqual(MaterialPrice.objects.count(), 1)
 
 
-class ProjectCostTests(BaseTestCase):
+class ProjectPriceTests(BaseTestCase):
     def setUp(self):
         super().setUp()
         self.load_cape_town_prices()
-        self.project = Project.objects.create(name='House', created_by=self.user)
-        self.full = ProjectBlock.objects.create(project=self.project, block_type='F', quantity=70)
-        self.half = ProjectBlock.objects.create(project=self.project, block_type='H', quantity=35)
+        self.project = Project.objects.create(name='House', created_by=self.user,
+                                              mix=MixRatio.objects.get(name='Batch 4 (optimum)'))
+        ProjectBlock.objects.create(project=self.project, block_type='F', quantity=70)
+        self.sand = Material.objects.get(name='Sand')
+        self.set_url = reverse('project_price_set', args=[self.project.pk, self.sand.pk])
+        self.reset_url = reverse('project_price_reset', args=[self.project.pk, self.sand.pk])
 
-    def project_price(self, material_name, price, project=None, status=MaterialPrice.Status.APPROVED):
-        material = Material.objects.get(name=material_name)
-        return MaterialPrice.objects.create(
-            material=material, project=project or self.project, price=Decimal(price), unit=material.base_unit,
-            status=status, created_by=self.user, reviewed_by=self.user, reviewed_at=timezone.now(),
-        )
-
-    def choose(self, block, mix_name):
-        block.mix = MixRatio.objects.get(name=mix_name)
-        block.save()
-
-    def test_no_total_until_manager_chooses_every_mix(self):
-        estimate = estimate_project(self.project)
+    def test_project_has_no_total_without_mixture(self):
+        project = Project.objects.create(name='No mix', created_by=self.user)
+        ProjectBlock.objects.create(project=project, block_type='F', quantity=70)
+        estimate = estimate_project(project)
         self.assertIsNone(estimate['total'])
-        self.assertEqual(len(estimate['unchosen']), 2)
-        self.assertTrue(all(line['selected'] is None for line in estimate['lines']))
-        self.choose(self.full, 'Batch 2')
-        estimate = estimate_project(self.project)
-        self.assertIsNone(estimate['total'])
-        self.assertEqual(estimate['unchosen'], [self.half])
+        self.assertContains(self.client.get(reverse('project_detail', args=[project.pk])), 'No mixture chosen yet.')
 
-    def test_project_total_uses_chosen_mixes(self):
-        self.choose(self.full, 'Batch 4 (optimum)')
-        self.choose(self.half, 'Batch 2')
-        estimate = estimate_project(self.project)
-        # 70 full with Batch 4: 3 batches x 161.36 = 484.08, plus 35 half with Batch 2: 1 x 177.79.
-        self.assertEqual(estimate['total'], Decimal('661.87'))
-        self.assertEqual(estimate['blocks'], 105)
-        self.assertEqual([line['selected']['mix'].name for line in estimate['lines']], ['Batch 4 (optimum)', 'Batch 2'])
-        # The cheapest is still flagged so the manager can compare.
-        self.assertEqual(estimate['lines'][0]['best']['mix'].name, 'Batch 2')
-
-    def test_project_price_overrides_default_only_for_that_project(self):
-        other = Project.objects.create(name='Other', created_by=self.user)
-        ProjectBlock.objects.create(project=other, block_type='F', quantity=22)
-        self.project_price('Cement 50kg', '100.00')
-        mine = latest_approved_prices(self.project)
-        theirs = latest_approved_prices(other)
-        cement = Material.objects.get(name='Cement 50kg').pk
-        self.assertEqual(mine[cement].price, Decimal('100.00'))
-        self.assertEqual(theirs[cement].price, Decimal('85.00'))
-
-    def test_pending_project_price_is_not_used(self):
-        self.project_price('Cement 50kg', '100.00', status=MaterialPrice.Status.PENDING)
-        cement = Material.objects.get(name='Cement 50kg').pk
-        self.assertEqual(latest_approved_prices(self.project)[cement].price, Decimal('85.00'))
-
-    def test_project_price_is_not_a_default(self):
-        self.project_price('Sand', '30.00')
-        sand = Material.objects.get(name='Sand').pk
-        self.assertEqual(latest_approved_prices()[sand].price, Decimal('16.43'))
-
-    def test_manager_adds_project_price_as_pending(self):
-        sand = Material.objects.get(name='Sand')
-        response = self.client.post(reverse('project_price_add', args=[self.project.pk]), {
-            'price-material': sand.pk, 'price-price': '20', 'price-price_unit': 'base', 'price-currency': 'zar',
-        })
-        self.assertRedirects(response, reverse('project_detail', args=[self.project.pk]) + '#project-prices',
+    def test_manager_sets_project_price_per_tonne(self):
+        response = self.client.post(self.set_url, {'price': '200'})
+        self.assertRedirects(response, reverse('project_detail', args=[self.project.pk]) + '#materials',
                              fetch_redirect_response=False)
         price = MaterialPrice.objects.get(project=self.project)
-        self.assertEqual((price.status, price.currency), (MaterialPrice.Status.PENDING, 'ZAR'))
+        self.assertEqual((price.price, price.unit, price.status), (Decimal('200'), 't', 'approved'))
+        # 6 wheelbarrows x 0.1 t x 200 = 120.00 instead of 98.58 for sand.
+        self.assertEqual(estimate_project(self.project)['total'], Decimal('505.50'))
 
-    def test_manager_chooses_and_changes_mix(self):
-        batch4 = MixRatio.objects.get(name='Batch 4 (optimum)')
-        batch3 = MixRatio.objects.get(name='Batch 3')
-        url = reverse('project_choose_mix', args=[self.project.pk, self.full.pk])
-        self.client.post(url, {'mix': batch4.pk})
-        self.full.refresh_from_db()
-        self.assertEqual(self.full.mix, batch4)
-        self.client.post(url, {'mix': batch3.pk})
-        self.full.refresh_from_db()
-        self.assertEqual(self.full.mix, batch3)
+    def test_project_price_does_not_change_other_projects_or_defaults(self):
+        self.client.post(self.set_url, {'price': '200'})
+        other = Project.objects.create(name='Other', created_by=self.user, mix=self.project.mix)
+        ProjectBlock.objects.create(project=other, block_type='F', quantity=70)
+        self.assertEqual(estimate_project(other)['total'], Decimal('484.08'))
+        self.assertEqual(latest_approved_prices()[self.sand.pk].price, Decimal('16.43'))
 
-    def test_cannot_choose_mix_for_other_block_type_or_inactive(self):
-        half_only = MixRatio.objects.create(name='Half only', block_type='H', blocks_per_batch=40)
-        inactive = MixRatio.objects.create(name='Old', block_type='B', blocks_per_batch=40, is_active=False)
-        url = reverse('project_choose_mix', args=[self.project.pk, self.full.pk])
-        self.assertEqual(self.client.post(url, {'mix': half_only.pk}).status_code, 404)
-        self.assertEqual(self.client.post(url, {'mix': inactive.pk}).status_code, 404)
-        self.assertEqual(self.client.post(url, {'mix': ''}).status_code, 404)
+    def test_newest_project_price_wins_and_reset_restores_default(self):
+        self.client.post(self.set_url, {'price': '200'})
+        self.client.post(self.set_url, {'price': '180'})
+        self.assertEqual(latest_approved_prices(self.project)[self.sand.pk].price, Decimal('180'))
+        self.client.post(self.reset_url)
+        self.assertFalse(MaterialPrice.objects.filter(project=self.project).exists())
+        self.assertEqual(estimate_project(self.project)['total'], Decimal('484.08'))
 
-    def test_accountant_cannot_choose_mix_or_add_project_price(self):
+    def test_invalid_project_price_is_rejected(self):
+        self.client.post(self.set_url, {'price': '-5'})
+        self.assertFalse(MaterialPrice.objects.filter(project=self.project).exists())
+
+    def test_material_without_weight_is_priced_per_unit(self):
+        Material.objects.filter(pk=self.sand.pk).update(tonnes_per_unit=None)
+        self.client.post(self.set_url, {'price': '20'})
+        self.assertEqual(MaterialPrice.objects.get(project=self.project).unit, 'wheelbarrow')
+
+    def test_only_manager_sets_project_prices(self):
         accountant = User.objects.create_user('acc', 'acc@example.com', 'S0me-strong-pass', role=User.Role.ACCOUNTANT)
         self.client.force_login(accountant)
-        url = reverse('project_choose_mix', args=[self.project.pk, self.full.pk])
-        self.assertEqual(self.client.post(url, {'mix': MixRatio.objects.first().pk}).status_code, 403)
-        self.assertEqual(self.client.post(reverse('project_price_add', args=[self.project.pk]), {}).status_code, 403)
+        self.assertEqual(self.client.post(self.set_url, {'price': '200'}).status_code, 403)
+        self.assertEqual(self.client.post(self.reset_url).status_code, 403)
 
-    def test_corrected_project_price_stays_on_project(self):
-        pending = self.project_price('Sand', '40.00', status=MaterialPrice.Status.PENDING)
-        accountant = User.objects.create_user('acc', 'acc@example.com', 'S0me-strong-pass', role=User.Role.ACCOUNTANT)
-        self.client.force_login(accountant)
-        next_url = reverse('project_detail', args=[self.project.pk])
-        response = self.client.post(reverse('price_review', args=[pending.pk]), {
-            'decision': 'declined', 'corrected_price': '18', 'next': next_url,
-        })
-        self.assertRedirects(response, next_url, fetch_redirect_response=False)
-        replacement = MaterialPrice.objects.get(project=self.project, status=MaterialPrice.Status.APPROVED)
-        self.assertEqual(replacement.price, Decimal('18'))
+    def test_project_page_shows_price_editor_to_manager(self):
+        response = self.client.get(reverse('project_detail', args=[self.project.pk]))
+        self.assertContains(response, 'Change price')
+        self.assertContains(response, self.set_url)
 
     def test_review_ignores_offsite_next(self):
-        pending = self.project_price('Sand', '40.00', status=MaterialPrice.Status.PENDING)
+        pending = MaterialPrice.objects.create(material=self.sand, price=Decimal('40'), unit='wheelbarrow',
+                                               created_by=self.user)
         self.user.role = User.Role.ACCOUNTANT
         self.user.save()
         response = self.client.post(reverse('price_review', args=[pending.pk]), {
             'decision': 'approved', 'next': 'https://evil.example.com/',
         })
         self.assertRedirects(response, reverse('config'), fetch_redirect_response=False)
-
-    def test_project_page_asks_manager_to_choose(self):
-        response = self.client.get(reverse('project_detail', args=[self.project.pk]))
-        self.assertContains(response, 'to see the project total')
-        self.assertContains(response, 'Choose this mix')
-        self.assertNotContains(response, 'Materials for the whole project')
-
-    def test_project_page_shows_total_and_project_price(self):
-        self.project_price('Cement 50kg', '100.00')
-        self.choose(self.full, 'Batch 2')
-        self.choose(self.half, 'Batch 2')
-        response = self.client.get(reverse('project_detail', args=[self.project.pk]))
-        self.assertContains(response, 'Materials for the whole project')
-        self.assertContains(response, 'This project')
 
 
 class ProjectStatusTests(BaseTestCase):
@@ -452,8 +458,8 @@ class ProjectStatusTests(BaseTestCase):
         )
 
     def choose_mix(self):
-        self.block.mix = MixRatio.objects.get(name='Batch 4 (optimum)')
-        self.block.save()
+        self.project.mix = MixRatio.objects.get(name='Batch 4 (optimum)')
+        self.project.save()
 
     def status(self):
         self.project.refresh_from_db()
@@ -479,7 +485,7 @@ class ProjectStatusTests(BaseTestCase):
         self.assertEqual(self.status(), 'draft')
         self.assertEqual(self.project.manager_next_status, 'pending')
 
-    def test_draft_to_pending_needs_chosen_mixes(self):
+    def test_draft_to_pending_needs_a_mixture(self):
         self.client.post(self.url, {'status': 'pending'})
         self.assertEqual(self.status(), 'draft')
         self.send_for_approval()
@@ -524,30 +530,25 @@ class ProjectStatusTests(BaseTestCase):
         for response in (
             self.client.get(reverse('project_edit', args=[self.project.pk])),
             self.client.post(reverse('project_edit', args=[self.project.pk]),
-                             {'name': 'X', 'full_quantity': '1', 'half_quantity': '0'}),
-            self.client.post(reverse('project_choose_mix', args=[self.project.pk, self.block.pk]), {'mix': mix.pk}),
+                             {'name': 'X', 'full_quantity': '1', 'half_quantity': '0', 'mix': mix.pk}),
             self.client.post(reverse('project_delete', args=[self.project.pk])),
         ):
             self.assertRedirects(response, self.detail)
         self.project.refresh_from_db()
-        self.block.refresh_from_db()
-        self.assertEqual(self.project.name, 'House')
-        self.assertEqual(self.block.mix.name, 'Batch 4 (optimum)')
+        self.assertEqual((self.project.name, self.project.mix.name), ('House', 'Batch 4 (optimum)'))
 
         sand = Material.objects.get(name='Sand')
-        self.client.post(reverse('project_price_add', args=[self.project.pk]), {
-            'price-material': sand.pk, 'price-price': '20', 'price-price_unit': 'base', 'price-currency': 'ZAR',
-        })
-        price = MaterialPrice.objects.get(project=self.project)
-        self.client.post(reverse('price_delete', args=[price.pk]))
+        self.client.post(reverse('project_price_set', args=[self.project.pk, sand.pk]), {'price': '200'})
+        self.assertTrue(MaterialPrice.objects.filter(project=self.project).exists())
+        self.client.post(reverse('project_price_reset', args=[self.project.pk, sand.pk]))
         self.assertFalse(MaterialPrice.objects.filter(project=self.project).exists())
 
-    def test_pending_page_hides_edit_controls_but_keeps_price_form(self):
+    def test_pending_page_hides_edit_controls_but_keeps_price_editor(self):
         self.send_for_approval()
         response = self.client.get(self.detail)
         self.assertNotContains(response, 'Edit project')
-        self.assertNotContains(response, 'Choose this mix')
-        self.assertContains(response, 'Set a price for this project')
+        self.assertNotContains(response, 'Change mixture')
+        self.assertContains(response, 'Change price')
 
     # ----- accountant decisions -----
 
@@ -598,10 +599,9 @@ class ProjectStatusTests(BaseTestCase):
         self.approve()
         sand = Material.objects.get(name='Sand')
         self.assertRedirects(self.client.get(reverse('project_edit', args=[self.project.pk])), self.detail)
-        self.client.post(reverse('project_price_add', args=[self.project.pk]), {
-            'price-material': sand.pk, 'price-price': '20', 'price-price_unit': 'base', 'price-currency': 'ZAR',
-        })
+        self.client.post(reverse('project_price_set', args=[self.project.pk, sand.pk]), {'price': '200'})
         self.assertFalse(MaterialPrice.objects.filter(project=self.project).exists())
+        self.assertNotContains(self.client.get(self.detail), 'Change price')
         self.client.post(self.url, {'status': 'draft'})
         self.assertEqual(self.status(), 'approved')
 
@@ -635,3 +635,13 @@ class ProjectStatusTests(BaseTestCase):
         self.assertNotContains(response, 'Edit project')
         self.assertNotContains(response, 'Mark completed')
         self.assertContains(response, 'kept as history')
+
+
+class CurrencyCaseTests(BaseTestCase):
+    def test_currency_case_does_not_split_the_total(self):
+        self.approve_price('Sand', '16.43')
+        price = self.approve_price('Cement 50kg', '85.00')
+        MaterialPrice.objects.filter(pk=price.pk).update(currency='Zar')
+        mix = MixRatio.objects.prefetch_related('ingredients__material').get(name='Batch 1')
+        result = cost_mix(mix, {'F': 22}, latest_approved_prices())
+        self.assertEqual((result['total'], result['currency']), (Decimal('134.29'), 'ZAR'))

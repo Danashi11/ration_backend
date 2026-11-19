@@ -4,14 +4,14 @@
   {% csrf_token %}
   <input type="hidden" name="status" value="{{ next }}">
   {% if next == 'pending' %}
-  <button type="submit" class="btn" data-busy-label="Sending…"{% if estimate.unchosen %} disabled title="Choose a mix for every block type first"{% endif %}>Send for approval</button>
-  {% if not compact %}<span class="field-help">{% if estimate.unchosen %}Choose a mix for every block type first.{% else %}An accountant approves or declines it.{% endif %}</span>{% endif %}
+  <button type="submit" class="btn" data-busy-label="Sending…"{% if not project.mix_id %} disabled title="Choose a mixture first"{% endif %}>Send for approval</button>
+  {% if not compact %}<span class="field-help">{% if not project.mix_id %}Choose a mixture first.{% else %}An accountant approves or declines it.{% endif %}</span>{% endif %}
   {% elif next == 'draft' %}
   <button type="submit" class="btn btn-quiet" data-busy-label="Moving…">Back to draft</button>
   {% if not compact %}<span class="field-help">Withdraws the approval request so the project can be edited again.</span>{% endif %}
   {% elif next == 'completed' %}
   <button type="submit" class="btn" data-busy-label="Completing…"{% if estimate.total is None %} disabled title="Every material needs an approved price first"{% endif %}>Mark completed</button>
-  {% if not compact %}<span class="field-help">{% if estimate.total is None %}Every material needs an approved price first.{% else %}Saves today's total of {{ estimate.total|money:estimate.currency }} and the prices used, then locks the project.{% endif %}</span>{% endif %}
+  {% if not compact %}<span class="field-help">{% if estimate.total is None %}Every material needs a price first.{% else %}Saves today's total of {{ estimate.total|money:estimate.currency }} and the prices used, then locks the project.{% endif %}</span>{% endif %}
   {% endif %}
 </form>
 {% endif %}{% endwith %}

@@ -51,6 +51,7 @@
       <tr>
         <th scope="col">Project</th>
         <th scope="col">Blocks</th>
+        <th scope="col" class="hide-sm">Mixture</th>
         <th scope="col">Status</th>
         <th scope="col">Created by</th>
         <th scope="col" class="num">Created</th>
@@ -64,6 +65,7 @@
           {% if project.description %}<div class="small muted clamp">{{ project.description }}</div>{% endif %}
         </td>
         <td class="muted">{% for block in project.blocks.all %}{{ block.quantity }} {{ block.get_block_type_display|lower }}{% if not forloop.last %}, {% endif %}{% endfor %}</td>
+        <td class="muted hide-sm">{{ project.mix.name|default:"—" }}</td>
         <td><span class="status status-{{ project.status }}">{{ project.get_status_display }}</span></td>
         <td class="muted">{{ project.created_by }}</td>
         <td class="num muted">{{ project.created_at|date:"j M Y" }}</td>

@@ -11,16 +11,17 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_POST
 
 from .forms import (
-    MaterialEditForm, MaterialForm, MaterialPriceForm, MixRatioForm,
-    ProjectEditForm, ProjectForm,
+    MaterialEditForm, MaterialForm, MaterialPriceForm, MixRatioForm, ProjectForm, ProjectPriceForm,
 )
 from .models import (
-    BlockType, Material, MaterialPrice, MixBlockType, MixRatio, Project, ProjectApproval, ProjectBlock,
+    BlockType, Material, MaterialPrice, MixRatio, Project, ProjectApproval, ProjectBlock,
 )
 from .permissions import (
     config_viewer_required, manager_required, price_reviewer_required, project_approver_required,
 )
-from .services import estimate_project, latest_approved_prices, price_per_base_unit, save_estimate
+from .services import (
+    estimate_project, latest_approved_prices, price_per_base_unit, price_per_tonne, pricing_data, save_estimate,
+)
 from .templatetags.ration import money
 
 
@@ -41,7 +42,7 @@ def visible_projects(user):
 
 @login_required
 def project_list_view(request):
-    projects = visible_projects(request.user).select_related('created_by').prefetch_related(
+    projects = visible_projects(request.user).select_related('created_by', 'mix').prefetch_related(
         Prefetch('blocks', queryset=ProjectBlock.objects.order_by('block_type'))  # full before half
     )
     status = request.GET.get('status', '')
@@ -83,16 +84,24 @@ def project_list_view(request):
 def _save_blocks(project, form):
     """Make the project's block lines match the quantities in the form."""
     wanted = dict(form.block_quantities())
-    strength = form.cleaned_data['required_strength_mpa']
     for block_type in BlockType.values:
         quantity = wanted.get(block_type)
         if quantity:
             ProjectBlock.objects.update_or_create(
-                project=project, block_type=block_type,
-                defaults={'quantity': quantity, 'required_strength_mpa': strength},
+                project=project, block_type=block_type, defaults={'quantity': quantity},
             )
         else:
             ProjectBlock.objects.filter(project=project, block_type=block_type).delete()
+
+
+def _project_form_page(request, form, project=None):
+    return render(request, 'core/project_form.html', {
+        'form': form,
+        'project': project,
+        'mixes': MixRatio.objects.filter(pk__in=form.fields['mix'].queryset)
+        .prefetch_related('ingredients__material').order_by('name'),
+        'pricing': pricing_data(project),
+    })
 
 
 @manager_required
@@ -104,85 +113,79 @@ def project_new_view(request):
             project.created_by = request.user
             project.save()
             _save_blocks(project, form)
+        messages.success(request, f'Project created with {project.mix.name}. Check the prices, then send it for approval.')
         return redirect('project_detail', pk=project.pk)
+    return _project_form_page(request, form)
 
-    mixes = MixRatio.objects.filter(is_active=True).prefetch_related('ingredients__material').order_by('name')
-    return render(request, 'core/project_new.html', {'form': form, 'mixes': mixes})
+
+@manager_required
+def project_edit_view(request, pk):
+    project = get_object_or_404(Project, pk=pk)
+    if not project.is_editable:
+        return _not_editable(request, project)
+    form = ProjectForm(request.POST or None, instance=project)
+    if request.method == 'POST' and form.is_valid():
+        with transaction.atomic():
+            form.save()
+            _save_blocks(project, form)
+        messages.success(request, 'Project saved.')
+        return redirect('project_detail', pk=project.pk)
+    return _project_form_page(request, form, project)
 
 
 @login_required
 def project_detail_view(request, pk):
-    project = get_object_or_404(visible_projects(request.user).select_related('created_by'), pk=pk)
+    project = get_object_or_404(visible_projects(request.user).select_related('created_by', 'mix'), pk=pk)
     estimate = estimate_project(project)
-
-    # Materials this project's mixes use, with the price each one is costed at.
-    materials = {}
-    for line in estimate['lines']:
-        for option in line['options']:
-            for item in option['lines']:
-                materials.setdefault(item['material'].pk, item['material'])
-    material_rows = []
-    for material in sorted(materials.values(), key=lambda m: m.name):
-        price = estimate['prices'].get(material.pk)
-        material_rows.append({
-            'material': material,
-            'price': price,
-            'unit_price': price_per_base_unit(price) if price else None,
-        })
-
     context = {
         'project': project,
         'estimate': estimate,
-        'blocks': estimate['lines'],
-        'material_rows': material_rows,
-        'project_prices': project.material_prices.select_related('material', 'created_by', 'reviewed_by')
-        .order_by('-created_at'),
         'final': project.final_estimate,
         'approvals': project.approvals.select_related('reviewed_by').order_by('-reviewed_at'),
         'status_steps': _status_steps(project),
+        'can_edit_prices': request.user.is_manager and project.prices_editable,
     }
     if context['final']:
         context['final_materials'] = context['final'].materials.select_related('material')
-    if request.user.is_manager and project.prices_editable:
-        # Default to the currency this project is already priced in, so totals stay addable.
-        currency = estimate['currency'] or next(
-            (row['price'].currency for row in material_rows if row['price']), 'ZAR'
-        )
-        context['price_form'] = MaterialPriceForm(prefix='price', initial={'currency': currency})
     return render(request, 'core/project_detail.html', context)
 
 
 @manager_required
 @require_POST
-def project_choose_mix_view(request, pk, block_pk):
-    block = get_object_or_404(ProjectBlock.objects.select_related('project'), pk=block_pk, project_id=pk)
-    if not block.project.is_editable:
-        return _not_editable(request, block.project)
-    block.mix = get_object_or_404(
-        MixRatio, pk=request.POST.get('mix') or 0, is_active=True,
-        block_type__in=[block.block_type, MixBlockType.BOTH],
+def project_price_set_view(request, pk, material_pk):
+    """Set this project's price for one material. The accountant checks it when approving the project."""
+    project = get_object_or_404(Project, pk=pk)
+    material = get_object_or_404(Material, pk=material_pk)
+    back = f"{reverse('project_detail', args=[pk])}#materials"
+    if not project.prices_editable:
+        return _not_editable(request, project)
+    form = ProjectPriceForm(material, request.POST)
+    if not form.is_valid():
+        messages.error(request, f'{material.name}: {_first_error(form)}')
+        return redirect(back)
+
+    current = latest_approved_prices(project).get(material.pk)
+    MaterialPrice.objects.create(
+        material=material, project=project, price=form.cleaned_data['price'], unit=form.unit(),
+        currency=current.currency.upper() if current else 'ZAR',
+        status=MaterialPrice.Status.APPROVED, created_by=request.user,
     )
-    block.save(update_fields=['mix'])
-    messages.success(request, f'{block.get_block_type_display()} blocks now use {block.mix.name}.')
-    return redirect(f"{reverse('project_detail', args=[pk])}#block-{block.pk}")
+    per = 'tonne' if form.per_tonne else material.base_unit
+    messages.success(request, f'{material.name} price for this project set to {form.cleaned_data["price"]} per {per}.')
+    return redirect(back)
 
 
 @manager_required
 @require_POST
-def project_price_add_view(request, pk):
+def project_price_reset_view(request, pk, material_pk):
+    """Drop this project's own price for a material so the default price applies again."""
     project = get_object_or_404(Project, pk=pk)
     if not project.prices_editable:
         return _not_editable(request, project)
-    form = MaterialPriceForm(request.POST, prefix='price')
-    if form.is_valid():
-        price = form.save(commit=False)
-        price.project = project
-        price.created_by = request.user
-        price.save()
-        messages.success(request, f'{price.material} price for this project sent for approval.')
-    else:
-        messages.error(request, _first_error(form))
-    return redirect(f"{reverse('project_detail', args=[pk])}#project-prices")
+    material = get_object_or_404(Material, pk=material_pk)
+    project.material_prices.filter(material=material).delete()
+    messages.success(request, f'{material.name} uses the default price again.')
+    return redirect(f"{reverse('project_detail', args=[pk])}#materials")
 
 
 @manager_required
@@ -197,9 +200,8 @@ def project_status_view(request, pk):
     back = f"{reverse('project_detail', args=[pk])}#project-status"
 
     if status == Project.Status.PENDING:
-        unchosen = project.blocks.filter(mix__isnull=True)
-        if unchosen.exists():
-            messages.error(request, 'Choose a mix for every block type before sending the project for approval.')
+        if project.mix_id is None:
+            messages.error(request, 'Choose a mixture before sending the project for approval.')
             return redirect(back)
         project.status = status
         project.save(update_fields=['status', 'updated_at'])
@@ -213,7 +215,7 @@ def project_status_view(request, pk):
     else:  # approved -> completed
         estimate = estimate_project(project)
         if estimate['total'] is None:
-            messages.error(request, 'Every material in the chosen mixes needs an approved price before completing.')
+            messages.error(request, 'Every material in the mixture needs a price before completing.')
             return redirect(back)
         with transaction.atomic():
             saved = save_estimate(project, request.user, estimate)
@@ -246,7 +248,7 @@ def project_review_view(request, pk):
         messages.error(request, 'Say what needs changing so the manager can fix it.')
         return redirect(back)
     if decision == ProjectApproval.Decision.APPROVED and estimate_project(project)['total'] is None:
-        messages.error(request, 'This project can\'t be approved until every material in its mixes has an approved price.')
+        messages.error(request, 'This project can\'t be approved until every material in its mixture has a price.')
         return redirect(back)
 
     with transaction.atomic():
@@ -261,21 +263,6 @@ def project_review_view(request, pk):
     else:
         messages.success(request, f'"{project.name}" declined and sent back to the manager as a draft.')
     return redirect('project_detail', pk=pk)
-
-
-@manager_required
-def project_edit_view(request, pk):
-    project = get_object_or_404(Project, pk=pk)
-    if not project.is_editable:
-        return _not_editable(request, project)
-    form = ProjectEditForm(request.POST or None, instance=project)
-    if request.method == 'POST' and form.is_valid():
-        with transaction.atomic():
-            form.save()
-            _save_blocks(project, form)
-        messages.success(request, 'Project saved.')
-        return redirect('project_detail', pk=project.pk)
-    return render(request, 'core/project_edit.html', {'form': form, 'project': project})
 
 
 @manager_required
@@ -304,6 +291,7 @@ def config_view(request):
         material.current_unit_price = (
             price_per_base_unit(material.current_price) if material.current_price else None
         )
+        material.current_tonne_price = price_per_tonne(material, material.current_unit_price)
     context = {
         'mixes': MixRatio.objects.prefetch_related('ingredients__material').order_by('-is_active', 'name'),
         'materials': materials,
@@ -443,7 +431,11 @@ def mix_edit_view(request, pk=None):
 @require_POST
 def mix_delete_view(request, pk):
     mix = get_object_or_404(MixRatio, pk=pk)
-    mix.delete()
+    try:
+        mix.delete()
+    except ProtectedError:
+        messages.error(request, f'"{mix.name}" is used by projects, so it can\'t be deleted. Untick Active instead.')
+        return redirect('mix_edit', pk=pk)
     messages.success(request, f'Mix "{mix.name}" deleted.')
     return redirect('config')
 
