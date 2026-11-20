@@ -49,6 +49,12 @@ if RENDER_EXTERNAL_HOSTNAME:
     ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
     CSRF_TRUSTED_ORIGINS.append(f'https://{RENDER_EXTERNAL_HOSTNAME}')
 
+# Sharing the local app through an ngrok tunnel (./share.sh sets DJANGO_NGROK=true).
+NGROK_DOMAINS = ['ngrok-free.app', 'ngrok-free.dev', 'ngrok.app', 'ngrok.dev', 'ngrok.io']
+if os.environ.get('DJANGO_NGROK', 'false').lower() in ('1', 'true', 'yes'):
+    ALLOWED_HOSTS += [f'.{domain}' for domain in NGROK_DOMAINS]
+    CSRF_TRUSTED_ORIGINS += [f'https://*.{domain}' for domain in NGROK_DOMAINS]
+
 
 # Application definition
 

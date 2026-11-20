@@ -10,6 +10,7 @@ Built with Django 6.1 and server-rendered templates. It runs on SQLite locally a
 - [Requirements](#requirements)
 - [Setup](#setup)
 - [Running the app](#running-the-app)
+- [Sharing it with ngrok](#sharing-it-with-ngrok)
 - [Configuration](#configuration)
 - [Project structure](#project-structure)
 - [How costs are calculated](#how-costs-are-calculated)
@@ -111,6 +112,40 @@ First steps after logging in as the superuser:
 3. Click **Send for approval**. As an accountant, open the project and click **Approve**.
 4. As a manager, click **Mark completed** to save the project as history.
 
+## Sharing it with ngrok
+
+[ngrok](https://ngrok.com) gives your computer a public HTTPS link, so someone else (a professor, a client) can use the app running on your machine with your local data. The link works only while you keep it running.
+
+**One-time setup**
+
+1. Create a free account at https://ngrok.com and [install ngrok](https://ngrok.com/download).
+2. Sign in from the terminal with the token from https://dashboard.ngrok.com/get-started/your-authtoken:
+
+   ```bash
+   ngrok config add-authtoken YOUR_TOKEN
+   ```
+
+3. Optional but recommended: claim your free fixed domain at https://dashboard.ngrok.com/domains and add it to `.env`, so the link is the same every time:
+
+   ```
+   NGROK_DOMAIN=your-name.ngrok-free.app
+   ```
+
+**Every time you want to share**
+
+```bash
+./share.sh
+```
+
+The script applies migrations, collects the CSS files, starts the app with gunicorn and **debug mode off** on port 8001 (so it doesn't clash with `runserver` on 8000), and opens the tunnel. It prints the link to give out. Press Ctrl+C to stop both the app and the link. Use `PORT=8002 ./share.sh` for another port.
+
+**Good to know**
+
+- On the free plan, visitors first see an ngrok page saying they're about to visit a site served by ngrok; they click **Visit Site** once.
+- Give each tester their own account in `/admin/` (for example one manager and one accountant to try the approval flow). Don't share your own password.
+- Visitors see your real local projects and prices.
+- The deployed Render site is an alternative link that works even when your computer is off.
+
 ## Configuration
 
 Settings are read from environment variables, or from a `.env` file in the project folder for local development.
@@ -125,6 +160,8 @@ Settings are read from environment variables, or from a `.env` file in the proje
 | `DJANGO_SECURE_SSL_REDIRECT` | `true` | Redirect HTTP to HTTPS when debug is off. Set to `false` only for tests. |
 | `DJANGO_HSTS_SECONDS` | `3600` | HSTS duration when debug is off. |
 | `DJANGO_EMAIL_BACKEND` | console (debug) / SMTP | The app doesn't send email yet. |
+| `DJANGO_NGROK` | `false` | Allows `*.ngrok-free.app` and other ngrok addresses. `share.sh` turns it on. |
+| `NGROK_DOMAIN` | unset | Your fixed ngrok domain, used by `share.sh`. |
 | `DJANGO_SUPERUSER_USERNAME`, `DJANGO_SUPERUSER_EMAIL`, `DJANGO_SUPERUSER_PASSWORD` | unset | Used once by `build.sh` on Render to create the first admin. Remove them after the first deploy. |
 
 ## Project structure
@@ -134,6 +171,7 @@ ration_backend/
 ├── manage.py                     Django command-line entry point
 ├── requirements.txt              Python dependencies
 ├── build.sh                      Render build: install, collect static files, migrate
+├── share.sh                      Share the local app through an ngrok tunnel
 ├── render.yaml                   Render blueprint: web service + Postgres database
 ├── .env.example                  Template for local settings
 ├── .python-version               Python version used on Render and in CI
