@@ -2,7 +2,7 @@
 <section class="section{% if first %} section-first{% endif %}" aria-labelledby="price-history-title" id="price-history">
   <div class="section-head">
     <div>
-      <h2 id="price-history-title">{% if user.can_review_prices and pending_count %}Prices to review{% else %}Price history{% endif %}</h2>
+      <h2 id="price-history-title">{% if user.can_review_prices and pending_count %}Prices to review{% else %}Prices{% endif %}</h2>
       <p class="muted small">
         {% if pending_count %}{{ pending_count }} price{{ pending_count|pluralize }} waiting for review.{% else %}Nothing waiting for review.{% endif %}
         {% if user.can_review_prices %}Decline a price and enter the correct figure to replace it in one step.
@@ -33,13 +33,13 @@
           <td><span class="status status-{{ price.status }}">{{ price.get_status_display }}</span></td>
           <td class="muted">{{ price.created_by }}<div class="small">{{ price.created_at|date:"j M Y" }}</div></td>
           <td class="muted">{% if price.reviewed_by %}{{ price.reviewed_by }}<div class="small">{{ price.reviewed_at|date:"j M Y" }}</div>{% else %}—{% endif %}</td>
-          <td>{% url 'config' as config_url %}{% include "core/_price_actions.html" with next=config_url|add:"#price-history" %}</td>
+          <td>{% include "core/_price_actions.html" with next=request.get_full_path %}</td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
   {% else %}
-  <p class="empty">No prices yet.{% if user.is_manager %} Add one above and it will wait here for an accountant to approve it.{% endif %}</p>
+  <p class="empty">{% if status %}No {{ status }} prices.{% else %}No prices yet.{% if user.is_manager %} <a href="{% url 'materials' %}">Add a default price</a> and it will wait here for an accountant to approve it.{% endif %}{% endif %}</p>
   {% endif %}
 </section>

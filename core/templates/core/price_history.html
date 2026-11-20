@@ -1,0 +1,23 @@
+{% extends "core/base.html" %}
+
+{% block title %}Price history · Ration{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="display">Price history</h1>
+  <p class="lede">Every default and project price, newest first. Prices waiting for approval are listed at the top.</p>
+</div>
+
+{% if total %}
+<div class="filters">
+  <div class="filter-tabs" aria-label="Filter by status">
+    <a href="{% url 'price_history' %}" {% if not status %}aria-current="true"{% endif %}>All <span>{{ total }}</span></a>
+    {% for item in statuses %}
+    <a href="?status={{ item.value }}" {% if status == item.value %}aria-current="true"{% endif %}>{{ item.label }} <span>{{ item.count }}</span></a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{% include "core/_price_history.html" with first=True %}
+{% endblock %}

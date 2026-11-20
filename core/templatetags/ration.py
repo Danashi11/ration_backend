@@ -109,3 +109,11 @@ def per_tonne_of(material, unit_price):
     if unit_price is None or not material.tonnes_per_unit:
         return None
     return (unit_price / material.tonnes_per_unit).quantize(Decimal('0.01'))
+
+
+@register.filter
+def kg(tonnes):
+    """'50' from 0.05 tonnes."""
+    if tonnes is None:
+        return ''
+    return f'{(tonnes * 1000).normalize():f}'

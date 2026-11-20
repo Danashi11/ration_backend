@@ -23,7 +23,7 @@
 {% if pending_prices %}
 <div class="notice notice-warning" role="status">
   {{ pending_prices }} material price{{ pending_prices|pluralize }} waiting for your review.
-  <a href="{% url 'config' %}#price-history">Review prices</a>
+  <a href="{% url 'price_history' %}?status=pending">Review prices</a>
 </div>
 {% endif %}
 

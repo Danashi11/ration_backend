@@ -45,7 +45,7 @@ Draft ──Send for approval──▶ Pending ──Approve (accountant)──�
 
 **Prices**
 
-- **Default prices** apply to every project. They're added on **Mixes and prices** and wait for an accountant's approval before they're used.
+- **Default prices** apply to every project. They're added on the **Materials** page and wait for an accountant's approval before they're used.
 - **Project prices** are set by the manager on the project page and apply to that project only. They're used straight away; the accountant checks them when approving the project and can decline it with a comment such as "the sand price is too high".
 - Quantities and prices are shown **per tonne**, with wheelbarrows and bags as a smaller second line for the people mixing on site. Each material has a weight per unit (starting values: sand 0.100 t and stone 0.090 t per wheelbarrow, cement 0.050 t per bag), editable on its material page.
 - Default prices can be entered per tonne, per unit (wheelbarrow, bag) or per cubic metre for sand and stone (1 m³ = 16 wheelbarrows).
@@ -159,7 +159,7 @@ ration_backend/
     ├── views.py                  All pages and actions, with role and status checks
     ├── forms.py                  Project (with mixture), mix (fixed materials), material and price forms
     ├── permissions.py            manager_required, price_reviewer_required, ...
-    ├── urls.py                   /projects/..., /config/...
+    ├── urls.py                   /projects/..., /mixes/, /materials/, /history/
     ├── admin.py                  Admin pages for the core tables
     ├── templatetags/ration.py    money, measure, recipe bars and material colours
     ├── management/commands/
@@ -183,8 +183,10 @@ ration_backend/
 | `/projects/new/` | Create a project (managers) |
 | `/projects/<id>/` | Project total, mixture, materials in tonnes, project prices and status |
 | `/projects/<id>/edit/` | Edit a draft project (managers) |
-| `/config/` | Mixes, materials, default prices and price review |
-| `/config/mixes/new/`, `/config/mixes/<id>/` | Create or edit a mix |
+| `/mixes/` | All mixtures (batch recipes) |
+| `/config/mixes/new/`, `/config/mixes/<id>/` | Create or edit a mixture |
+| `/materials/` | Materials, their weight per unit and default prices; add a material or a default price |
+| `/history/` | Every default and project price, filtered by status; accountants approve or decline here |
 | `/admin/` | Django admin (superusers) |
 
 ## How costs are calculated

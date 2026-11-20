@@ -168,7 +168,7 @@ class ViewTests(BaseTestCase):
 
     def test_create_mix_with_fixed_materials(self):
         response = self.client.post(reverse('mix_new'), self.mix_post(**{'Sand': '3', 'Cement 50kg': '1'}))
-        self.assertRedirects(response, reverse('config'))
+        self.assertRedirects(response, reverse('mixes'))
         mix = MixRatio.objects.get(name='Half mix')
         self.assertEqual(
             {(i.material.name, i.quantity, i.unit) for i in mix.ingredients.select_related('material')},
@@ -194,14 +194,16 @@ class ViewTests(BaseTestCase):
         self.assertContains(response, 'Enter a quantity for at least one material.')
         self.assertFalse(MixRatio.objects.filter(name='Half mix').exists())
 
-    def test_add_price_then_config_page_lists_it(self):
+    def test_add_price_then_history_lists_it(self):
         sand = Material.objects.get(name='Sand')
         response = self.client.post(reverse('price_add'), {
             'price-material': sand.pk, 'price-price': '150', 'price-price_unit': 'base', 'price-currency': 'ZAR',
         }, follow=True)
-        self.assertEqual(response.status_code, 200)
+        self.assertRedirects(response, reverse('materials'))
         self.assertContains(response, 'sent for approval')
-        self.assertContains(response, 'R 150.00 <span class="muted small">per wheelbarrow</span>', html=False)
+        self.assertContains(response, '1 price waiting for approval.')
+        history = self.client.get(reverse('price_history'))
+        self.assertContains(history, 'R 150.00 <span class="muted small">per wheelbarrow</span>', html=False)
 
     def test_manager_cannot_approve_price(self):
         price = MaterialPrice.objects.create(
@@ -283,9 +285,11 @@ class RoleTests(BaseTestCase):
 
     def test_accountant_can_view_config_but_creator_cannot(self):
         self.as_role(User.Role.ACCOUNTANT)
-        self.assertEqual(self.client.get(reverse('config')).status_code, 200)
+        for name in ('mixes', 'materials', 'price_history'):
+            self.assertEqual(self.client.get(reverse(name)).status_code, 200, name)
         self.as_role(User.Role.CREATOR)
-        self.assertEqual(self.client.get(reverse('config')).status_code, 403)
+        for name in ('mixes', 'materials', 'price_history', 'config'):
+            self.assertEqual(self.client.get(reverse(name)).status_code, 403, name)
 
     def test_manager_edits_project_name_and_blocks(self):
         project = self.make_project()
@@ -317,7 +321,7 @@ class RoleTests(BaseTestCase):
 
     def test_material_weight_can_be_edited(self):
         sand = Material.objects.get(name='Sand')
-        self.client.post(reverse('material_edit', args=[sand.pk]), {'name': 'Sand', 'tonnes_per_unit': '0.11', 'is_active': 'on'})
+        self.client.post(reverse('material_edit', args=[sand.pk]), {'name': 'Sand', 'weight_kg': '110', 'is_active': 'on'})
         sand.refresh_from_db()
         self.assertEqual(sand.tonnes_per_unit, Decimal('0.11'))
 
@@ -328,7 +332,7 @@ class RoleTests(BaseTestCase):
 
     def test_unused_material_can_be_deleted_and_edited(self):
         lime = Material.objects.create(name='Lime', base_unit='bag')
-        self.client.post(reverse('material_edit', args=[lime.pk]), {'name': 'Hydrated lime', 'is_active': ''})
+        self.client.post(reverse('material_edit', args=[lime.pk]), {'name': 'Hydrated lime', 'weight_kg': '25', 'is_active': ''})
         lime.refresh_from_db()
         self.assertEqual((lime.name, lime.is_active), ('Hydrated lime', False))
         self.client.post(reverse('material_delete', args=[lime.pk]))
@@ -441,7 +445,7 @@ class ProjectPriceTests(BaseTestCase):
         response = self.client.post(reverse('price_review', args=[pending.pk]), {
             'decision': 'approved', 'next': 'https://evil.example.com/',
         })
-        self.assertRedirects(response, reverse('config'), fetch_redirect_response=False)
+        self.assertRedirects(response, reverse('price_history'), fetch_redirect_response=False)
 
 
 class ProjectStatusTests(BaseTestCase):
@@ -645,3 +649,126 @@ class CurrencyCaseTests(BaseTestCase):
         mix = MixRatio.objects.prefetch_related('ingredients__material').get(name='Batch 1')
         result = cost_mix(mix, {'F': 22}, latest_approved_prices())
         self.assertEqual((result['total'], result['currency']), (Decimal('134.29'), 'ZAR'))
+
+
+class QuantityHintTests(BaseTestCase):
+    def test_block_counts_start_empty_with_zero_hint(self):
+        response = self.client.get(reverse('project_new'))
+        self.assertContains(response, 'placeholder="0"', count=2)
+        self.assertNotContains(response, 'name="full_quantity" id="id_full_quantity"\n         placeholder="0" value=')
+
+    def test_edit_shows_saved_count_and_leaves_missing_type_empty(self):
+        project = Project.objects.create(name='House', created_by=self.user, mix=MixRatio.objects.get(name='Batch 2'))
+        ProjectBlock.objects.create(project=project, block_type='F', quantity=500)
+        html = self.client.get(reverse('project_edit', args=[project.pk])).content.decode()
+        self.assertIn('value="500"', html)
+        self.assertNotIn('value="0"', html)
+
+
+class SplitPagesTests(BaseTestCase):
+    def test_old_config_address_redirects_to_mixes(self):
+        self.assertRedirects(self.client.get(reverse('config')), reverse('mixes'))
+
+    def test_each_page_shows_its_own_content(self):
+        mixes = self.client.get(reverse('mixes'))
+        self.assertContains(mixes, 'Batch 4 (optimum)')
+        self.assertNotContains(mixes, 'Add a material')
+        materials = self.client.get(reverse('materials'))
+        self.assertContains(materials, 'Stone 13mm')
+        self.assertContains(materials, 'Add a default price')
+        self.assertNotContains(materials, 'Batch 4 (optimum)')
+        history = self.client.get(reverse('price_history'))
+        self.assertContains(history, 'Price history')
+        self.assertNotContains(history, 'Add a material')
+
+    def test_navigation_links_to_the_three_pages(self):
+        response = self.client.get(reverse('project_list'))
+        for name in ('mixes', 'materials', 'price_history'):
+            self.assertContains(response, f'href="{reverse(name)}"')
+
+    def test_history_filters_by_status_and_lists_pending_first(self):
+        sand = Material.objects.get(name='Sand')
+        self.approve_price('Sand', '16.43')
+        MaterialPrice.objects.create(material=sand, price=Decimal('20'), unit='wheelbarrow', created_by=self.user)
+        response = self.client.get(reverse('price_history'))
+        prices = list(response.context['prices'])
+        self.assertEqual(prices[0].status, 'pending')
+        pending = self.client.get(reverse('price_history'), {'status': 'pending'})
+        self.assertEqual([p.status for p in pending.context['prices']], ['pending'])
+
+    def test_review_from_history_returns_to_history(self):
+        sand = Material.objects.get(name='Sand')
+        price = MaterialPrice.objects.create(material=sand, price=Decimal('20'), unit='wheelbarrow', created_by=self.user)
+        self.user.role = User.Role.ACCOUNTANT
+        self.user.save()
+        next_url = reverse('price_history') + '?status=pending'
+        response = self.client.post(reverse('price_review', args=[price.pk]), {'decision': 'approved', 'next': next_url})
+        self.assertRedirects(response, next_url, fetch_redirect_response=False)
+
+    def test_mix_and_material_saves_return_to_their_pages(self):
+        lime = Material.objects.create(name='Lime', base_unit='bag')
+        response = self.client.post(reverse('material_edit', args=[lime.pk]), {'name': 'Lime', 'weight_kg': '25', 'is_active': 'on'})
+        self.assertRedirects(response, reverse('materials'))
+
+
+class MaterialFormTests(BaseTestCase):
+    def add_material(self, **data):
+        post = {'material-name': 'Lime', 'material-base_unit': 'bag', 'material-weight_kg': '25'}
+        post.update({f'material-{k}': v for k, v in data.items()})
+        return self.client.post(reverse('material_add'), post)
+
+    def add_price(self, material, basis, price='100', currency='zar'):
+        return self.client.post(reverse('price_add'), {
+            'price-material': material.pk, 'price-price_unit': basis, 'price-price': price, 'price-currency': currency,
+        })
+
+    def test_add_bagged_material_with_weight_in_kg(self):
+        self.assertRedirects(self.add_material(), reverse('materials'))
+        lime = Material.objects.get(name='Lime')
+        self.assertEqual((lime.base_unit, lime.tonnes_per_unit), ('bag', Decimal('0.025')))
+
+    def test_material_needs_a_weight_unless_bought_by_the_tonne(self):
+        response = self.add_material(weight_kg='')
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, 'Enter how many kg one bag weighs', status_code=400)
+        self.assertFalse(Material.objects.filter(name='Lime').exists())
+        self.assertRedirects(self.add_material(name='Gravel', base_unit='tonne', weight_kg=''), reverse('materials'))
+        self.assertEqual(Material.objects.get(name='Gravel').tonnes_per_unit, Decimal('1'))
+
+    def test_unit_must_be_one_of_the_choices(self):
+        response = self.add_material(base_unit='bucket')
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Material.objects.filter(name='Lime').exists())
+
+    def test_cement_can_be_priced_per_bag_or_tonne_but_not_m3(self):
+        cement = Material.objects.get(name='Cement 50kg')
+        response = self.add_price(cement, 'm3')
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, 'Cement 50kg can be priced per tonne, bag.', status_code=400)
+        self.assertRedirects(self.add_price(cement, 'base', '85'), reverse('materials'))
+        self.assertRedirects(self.add_price(cement, 't', '1700'), reverse('materials'))
+        units = list(MaterialPrice.objects.filter(material=cement).order_by('created_at').values_list('unit', 'currency'))
+        self.assertEqual(units, [('bag', 'ZAR'), ('t', 'ZAR')])
+
+    def test_sand_can_be_priced_per_m3(self):
+        sand = Material.objects.get(name='Sand')
+        self.assertRedirects(self.add_price(sand, 'm3', '262.88'), reverse('materials'))
+        self.assertEqual(MaterialPrice.objects.get(material=sand).unit, 'm3')
+
+    def test_invalid_price_form_keeps_what_was_typed(self):
+        cement = Material.objects.get(name='Cement 50kg')
+        response = self.add_price(cement, 'm3', '123.45')
+        self.assertContains(response, 'value="123.45"', status_code=400)
+
+    def test_materials_page_shows_weight_in_kg_and_price_options(self):
+        response = self.client.get(reverse('materials'))
+        self.assertContains(response, '50 kg per bag')
+        self.assertContains(response, '100 kg per wheelbarrow')
+        self.assertContains(response, 'id="price-bases"')
+        self.assertContains(response, 'Bought and measured by')
+
+    def test_edit_material_weight_in_kg(self):
+        cement = Material.objects.get(name='Cement 50kg')
+        response = self.client.get(reverse('material_edit', args=[cement.pk]))
+        self.assertContains(response, 'Weight of one bag (kg)')
+        self.assertContains(response, 'value="50"')

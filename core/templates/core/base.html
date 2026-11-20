@@ -15,7 +15,11 @@
     <nav class="nav" aria-label="Main">
       <a href="{% url 'project_list' %}" {% if name == 'project_list' or name == 'project_detail' or name == 'project_edit' %}aria-current="page"{% endif %}>Projects</a>
       {% if user.is_manager %}<a href="{% url 'project_new' %}" {% if name == 'project_new' %}aria-current="page"{% endif %}>New project</a>{% endif %}
-      {% if user.can_view_config %}<a href="{% url 'config' %}" {% if name == 'config' or name == 'mix_new' or name == 'mix_edit' or name == 'material_edit' %}aria-current="page"{% endif %}>Mixes and prices</a>{% endif %}
+      {% if user.can_view_config %}
+      <a href="{% url 'mixes' %}" {% if name == 'mixes' or name == 'mix_new' or name == 'mix_edit' %}aria-current="page"{% endif %}>Mixes</a>
+      <a href="{% url 'materials' %}" {% if name == 'materials' or name == 'material_edit' %}aria-current="page"{% endif %}>Materials</a>
+      <a href="{% url 'price_history' %}" {% if name == 'price_history' %}aria-current="page"{% endif %}>Price history</a>
+      {% endif %}
     </nav>
     {% endwith %}
     <div class="account">

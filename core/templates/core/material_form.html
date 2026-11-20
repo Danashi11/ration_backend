@@ -3,21 +3,21 @@
 {% block title %}{{ material.name }} · Ration{% endblock %}
 
 {% block content %}
-<a href="{% url 'config' %}" class="back">Back to mixes and prices</a>
+<a href="{% url 'materials' %}" class="back">Back to materials</a>
 
 <div class="page-head">
   <h1 class="display">{{ material.name }}</h1>
-  <p class="lede">Measured in {{ material.base_unit }}s. The unit can't change once a material exists, so older prices and mixes keep their meaning.</p>
+  <p class="lede">Bought and measured by the {{ material.base_unit }}. The unit can't change once a material exists, so older prices and mixes keep their meaning.</p>
 </div>
 
 <form method="post" novalidate class="narrow">
   {% csrf_token %}
   {% include "core/_field.html" with field=form.name %}
-  {% include "core/_field.html" with field=form.tonnes_per_unit help="Weight of one "|add:material.base_unit|add:" in tonnes, so quantities and prices show per tonne. 1 m³ = 16 wheelbarrows; sand weighs about 1.6 t per m³ (0.1 t a wheelbarrow)." %}
+  {% if form.weight_kg %}{% include "core/_field.html" with field=form.weight_kg help=form.weight_kg.help_text %}{% endif %}
   {% include "core/_field.html" with field=form.is_active help="Unavailable materials can't be picked for new mixes or prices. Existing mixes keep them." %}
   <div class="actions">
     <button type="submit" class="btn" data-busy-label="Saving…">Save material</button>
-    <a href="{% url 'config' %}" class="btn btn-quiet">Cancel</a>
+    <a href="{% url 'materials' %}" class="btn btn-quiet">Cancel</a>
   </div>
 </form>
 

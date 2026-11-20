@@ -1,0 +1,58 @@
+{% extends "core/base.html" %}
+{% load ration %}
+
+{% block title %}Mixes · Ration{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="display">Mixes</h1>
+  <p class="lede">Each mixture is one batch: wheelbarrows of sand and stone, pockets (50 kg bags) of cement, and how many blocks it makes. A project picks one mixture for all its blocks.</p>
+</div>
+
+<section aria-labelledby="mixes">
+  <div class="section-head">
+    <h2 id="mixes">All mixtures</h2>
+    {% if user.is_manager %}<a href="{% url 'mix_new' %}" class="btn btn-small">New mixture</a>{% endif %}
+  </div>
+  {% if mixes %}
+  <div class="table-wrap">
+    <table class="table mix-table">
+      <thead>
+        <tr>
+          <th scope="col">Mix</th>
+          <th scope="col">One batch</th>
+          <th scope="col">Used for</th>
+          <th scope="col" class="num">Strength</th>
+          <th scope="col" class="num">Blocks a batch</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for mix in mixes %}
+        {% recipe_segments mix as segments %}
+        <tr{% if not mix.is_active %} class="is-inactive"{% endif %}>
+          <td>
+            {% if user.is_manager %}<a href="{% url 'mix_edit' mix.pk %}">{{ mix.name }}</a>{% else %}{{ mix.name }}{% endif %}
+            {% if not mix.is_active %}<div class="small muted">Inactive</div>{% endif %}
+          </td>
+          <td>
+            {% if segments %}
+            <div class="recipe" aria-hidden="true">
+              {% for seg in segments %}<span class="recipe-seg tone-{{ seg.tone }}" style="flex: {{ seg.percent }}"></span>{% endfor %}
+            </div>
+            <div class="recipe-text">{% for seg in segments %}{{ seg.quantity|measure:seg.unit }} {{ seg.material.name|lower }}{% if not forloop.last %} + {% endif %}{% endfor %}</div>
+            {% else %}<span class="small muted">No ingredients yet</span>{% endif %}
+          </td>
+          <td data-label="For">{{ mix.get_block_type_display|lower }}</td>
+          <td class="num">{% if mix.strength_mpa %}{{ mix.strength_mpa|floatformat:"-2" }} MPa{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td class="num">{{ mix.blocks_per_batch }}<span class="mobile-only"> blocks a batch</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No mix ratios yet.{% if user.is_manager %} <a href="{% url 'mix_new' %}">Add your first one</a>.{% endif %}</p>
+  {% endif %}
+</section>
+
+{% endblock %}

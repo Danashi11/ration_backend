@@ -4,7 +4,7 @@
 {% block title %}{% if mix.pk %}{{ mix.name }}{% else %}New mix ratio{% endif %} · Ration{% endblock %}
 
 {% block content %}
-<a href="{% url 'config' %}" class="back">Back to mixes and prices</a>
+<a href="{% url 'mixes' %}" class="back">Back to mixes</a>
 
 <div class="page-head">
   <h1 class="display">{% if mix.pk %}{{ mix.name }}{% else %}New mix ratio{% endif %}</h1>
@@ -47,7 +47,7 @@
         {% for error in field.errors %}<span class="field-error">{{ error }}</span>{% endfor %}
       </li>
       {% empty %}
-      <li class="empty">No materials yet. Add sand, stone and cement in <a href="{% url 'config' %}">Mixes and prices</a> first.</li>
+      <li class="empty">No materials yet. Add sand, stone and cement in <a href="{% url 'materials' %}">Materials</a> first.</li>
       {% endfor %}
     </ul>
     <p class="muted small">Leave a material empty if the mix doesn't use it.</p>
@@ -55,7 +55,7 @@
 
   <div class="actions" style="margin-top: 32px;">
     <button type="submit" class="btn" data-busy-label="Saving…">Save mix</button>
-    <a href="{% url 'config' %}" class="btn btn-quiet">Cancel</a>
+    <a href="{% url 'mixes' %}" class="btn btn-quiet">Cancel</a>
   </div>
 </form>
 

@@ -1,0 +1,152 @@
+{% extends "core/base.html" %}
+{% load ration %}
+
+{% block title %}Materials · Ration{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1 class="display">Materials</h1>
+  <p class="lede">Default prices apply to every project unless a project has its own price. A new default price is used once an accountant approves it.</p>
+</div>
+
+{% if pending_count %}
+<div class="notice notice-warning" role="status">
+  {{ pending_count }} price{{ pending_count|pluralize }} waiting for approval.
+  <a href="{% url 'price_history' %}?status=pending">{% if user.can_review_prices %}Review {{ pending_count|pluralize:"it,them" }}{% else %}See {{ pending_count|pluralize:"it,them" }}{% endif %}</a>
+</div>
+{% endif %}
+
+<section aria-labelledby="materials">
+  <div class="section-head">
+    <h2 id="materials">Materials and default prices</h2>
+  </div>
+    {% if materials %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th scope="col">Material</th><th scope="col" class="num hide-sm">Weight</th><th scope="col" class="num">Default price</th></tr></thead>
+      <tbody>
+        {% for material in materials %}
+        <tr{% if not material.is_active %} class="is-inactive"{% endif %}>
+          <td>
+            <span class="swatch tone-{{ material|material_tone }}"></span>{% if user.is_manager %}<a href="{% url 'material_edit' material.pk %}">{{ material.name }}</a>{% else %}{{ material.name }}{% endif %}
+            {% if not material.is_active %}<div class="small muted">Unavailable</div>{% endif %}
+          </td>
+          <td class="num muted hide-sm">{% if material.base_unit == 'tonne' %}Bought by the tonne{% elif material.tonnes_per_unit %}{{ material.tonnes_per_unit|kg }} kg per {{ material.base_unit }}{% else %}<span title="Set it so quantities show in tonnes">Weight not set</span> <span class="small">({{ material.base_unit }}s)</span>{% endif %}</td>
+          <td class="num">
+            {% if material.current_price %}
+              {% if material.current_tonne_price is not None %}{{ material.current_tonne_price|money:material.current_price.currency }} <span class="muted small">/ t</span>
+              {% else %}{{ material.current_unit_price|money:material.current_price.currency }} <span class="muted small">/ {{ material.base_unit }}</span>{% endif %}
+            {% else %}<span class="status status-pending">No approved price</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No materials yet.{% if user.is_manager %} Add sand, stone and cement to start building mixes.{% endif %}</p>
+  {% endif %}
+</section>
+
+{% if user.is_manager %}
+<section class="section material-forms" aria-label="Add prices and materials">
+  <form method="post" action="{% url 'price_add' %}" class="subform" id="price-form" novalidate>
+    {% csrf_token %}
+    <h3>Add a default price</h3>
+    <p class="muted small">Used for every project once an accountant approves it.</p>
+    {% for error in price_form.non_field_errors %}<div class="notice notice-error" role="alert">{{ error }}</div>{% endfor %}
+    {% include "core/_field.html" with field=price_form.material %}
+    <div class="price-row">
+      {% include "core/_field.html" with field=price_form.price_unit %}
+      {% include "core/_field.html" with field=price_form.price %}
+      {% include "core/_field.html" with field=price_form.currency %}
+    </div>
+    <datalist id="currency-options">{% for code in currencies %}<option value="{{ code }}">{% endfor %}</datalist>
+    <p class="price-preview" id="price-preview" aria-live="polite"></p>
+    <div class="field"><button type="submit" class="btn" data-busy-label="Sending…">Send price for approval</button></div>
+  </form>
+
+  <form method="post" action="{% url 'material_add' %}" class="subform" id="material-form" novalidate>
+    {% csrf_token %}
+    <h3>Add a material</h3>
+    <p class="muted small">Set how it's bought and how much one unit weighs, so quantities show in tonnes.</p>
+    {% for error in material_form.non_field_errors %}<div class="notice notice-error" role="alert">{{ error }}</div>{% endfor %}
+    {% include "core/_field.html" with field=material_form.name %}
+    <fieldset class="field choice-field{% if material_form.base_unit.errors %} has-error{% endif %}">
+      <legend class="field-label">{{ material_form.base_unit.label }}</legend>
+      <div class="choice-row">
+        {% for radio in material_form.base_unit %}
+        <label class="choice">{{ radio.tag }}<span>{{ radio.choice_label }}</span></label>
+        {% endfor %}
+      </div>
+      {% for error in material_form.base_unit.errors %}<span class="field-error">{{ error }}</span>{% endfor %}
+    </fieldset>
+    <div id="weight-field">
+      {% include "core/_field.html" with field=material_form.weight_kg help=material_form.weight_kg.help_text %}
+    </div>
+    <div class="field"><button type="submit" class="btn btn-quiet" data-busy-label="Adding…">Add material</button></div>
+  </form>
+</section>
+
+{{ price_bases|json_script:"price-bases" }}
+<script>
+(function () {
+  // Price form: only offer the units that fit the chosen material, and show what the price works out to.
+  var bases = JSON.parse(document.getElementById('price-bases').textContent);
+  var form = document.getElementById('price-form');
+  var material = form.querySelector('[name="price-material"]');
+  var basis = form.querySelector('[name="price-price_unit"]');
+  var price = form.querySelector('[name="price-price"]');
+  var currency = form.querySelector('[name="price-currency"]');
+  var preview = document.getElementById('price-preview');
+  var wanted = basis.value;
+
+  function money(value) {
+    var code = (currency.value || 'ZAR').toUpperCase();
+    return (code === 'ZAR' ? 'R' : code) + ' ' + value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function refreshBases() {
+    var info = bases[material.value];
+    var keep = basis.value || wanted;
+    basis.innerHTML = '';
+    (info ? info.bases : [['t', 'tonne'], ['base', 'unit']]).forEach(function (b) {
+      var option = new Option(b[1], b[0]);
+      basis.add(option);
+    });
+    if ([].some.call(basis.options, function (o) { return o.value === keep; })) basis.value = keep;
+    basis.disabled = !info;
+    refreshPreview();
+  }
+
+  function refreshPreview() {
+    var info = bases[material.value];
+    var amount = parseFloat(price.value);
+    if (!info || !(amount > 0)) { preview.textContent = ''; return; }
+    var perUnit = basis.value === 't' ? amount * info.tonnes : basis.value === 'm3' ? amount / 16 : amount;
+    var parts = [money(perUnit) + ' per ' + info.unit];
+    if (info.tonnes && info.unit !== 'tonne') parts.push(money(perUnit / info.tonnes) + ' per tonne');
+    if (info.unit === 'wheelbarrow') parts.push(money(perUnit * 16) + ' per m³');
+    preview.textContent = '= ' + parts.join(' = ');
+  }
+
+  material.addEventListener('change', refreshBases);
+  [basis, price, currency].forEach(function (el) { el.addEventListener('input', refreshPreview); el.addEventListener('change', refreshPreview); });
+  refreshBases();
+
+  // Material form: a material bought by the tonne needs no weight.
+  var weight = document.getElementById('weight-field');
+  var units = document.querySelectorAll('#material-form [name="material-base_unit"]');
+  function refreshWeight() {
+    var chosen = [].find.call(units, function (r) { return r.checked; });
+    weight.hidden = !!chosen && chosen.value === 'tonne';
+    var label = weight.querySelector('label');
+    if (chosen && chosen.value !== 'tonne') label.textContent = 'Weight of one ' + chosen.value + ' (kg)';
+  }
+  units.forEach(function (r) { r.addEventListener('change', refreshWeight); });
+  refreshWeight();
+})();
+</script>
+{% endif %}
+
+{% endblock %}

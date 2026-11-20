@@ -3,7 +3,7 @@ from decimal import Decimal, InvalidOperation
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
-from django.db.models import Prefetch, ProtectedError, Q
+from django.db.models import Case, Prefetch, ProtectedError, Q, When
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -11,7 +11,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_POST
 
 from .forms import (
-    MaterialEditForm, MaterialForm, MaterialPriceForm, MixRatioForm, ProjectForm, ProjectPriceForm,
+    MaterialEditForm, MaterialForm, MaterialPriceForm, MixRatioForm, ProjectForm, ProjectPriceForm, price_bases,
 )
 from .models import (
     BlockType, Material, MaterialPrice, MixRatio, Project, ProjectApproval, ProjectBlock,
@@ -284,6 +284,17 @@ def project_delete_view(request, pk):
 
 @config_viewer_required
 def config_view(request):
+    """The old combined page; its pages are now Mixes, Materials and Price history."""
+    return redirect('mixes')
+
+
+@config_viewer_required
+def mixes_view(request):
+    mixes = MixRatio.objects.prefetch_related('ingredients__material').order_by('-is_active', 'name')
+    return render(request, 'core/mixes.html', {'mixes': mixes})
+
+
+def _materials_page(request, material_form=None, price_form=None, status=200):
     prices = latest_approved_prices()
     materials = list(Material.objects.order_by('-is_active', 'name'))
     for material in materials:
@@ -292,28 +303,67 @@ def config_view(request):
             price_per_base_unit(material.current_price) if material.current_price else None
         )
         material.current_tonne_price = price_per_tonne(material, material.current_unit_price)
-    context = {
-        'mixes': MixRatio.objects.prefetch_related('ingredients__material').order_by('-is_active', 'name'),
+    currencies = sorted(
+        {c.upper() for c in MaterialPrice.objects.values_list('currency', flat=True)} | {'ZAR'}
+    )
+    latest = MaterialPrice.objects.filter(project__isnull=True).order_by('-created_at').first()
+    return render(request, 'core/materials.html', {
         'materials': materials,
         'pending_count': MaterialPrice.objects.filter(status=MaterialPrice.Status.PENDING).count(),
-        'prices': MaterialPrice.objects.select_related('material', 'project', 'created_by', 'reviewed_by')
-        .order_by('-created_at')[:40],
-        'material_form': MaterialForm(prefix='material'),
-        'price_form': MaterialPriceForm(prefix='price'),
-    }
-    return render(request, 'core/config.html', context)
+        'material_form': material_form or MaterialForm(prefix='material'),
+        'price_form': price_form or MaterialPriceForm(
+            prefix='price', initial={'currency': latest.currency.upper() if latest else 'ZAR', 'price_unit': 't'},
+        ),
+        'price_bases': {
+            m.pk: {'unit': m.base_unit, 'tonnes': float(m.tonnes_per_unit) if m.tonnes_per_unit else None,
+                   'bases': price_bases(m)}
+            for m in materials if m.is_active
+        },
+        'currencies': currencies,
+    }, status=status)
+
+
+@config_viewer_required
+def materials_view(request):
+    return _materials_page(request)
+
+
+@config_viewer_required
+def price_history_view(request):
+    prices = MaterialPrice.objects.select_related('material', 'project', 'created_by', 'reviewed_by')
+    counts = {s: 0 for s in MaterialPrice.Status.values}
+    for row in prices.values('status'):
+        counts[row['status']] += 1
+    status = request.GET.get('status', '')
+    if status in MaterialPrice.Status.values:
+        prices = prices.filter(status=status)
+    else:
+        status = ''
+    statuses = [
+        {'value': value, 'label': label, 'count': counts[value]}
+        for value, label in MaterialPrice.Status.choices
+    ]
+    return render(request, 'core/price_history.html', {
+        # Waiting prices first, so reviewers see them straight away.
+        'prices': prices.order_by(
+            Case(When(status=MaterialPrice.Status.PENDING, then=0), default=1), '-created_at'
+        )[:200],
+        'pending_count': counts[MaterialPrice.Status.PENDING],
+        'statuses': statuses,
+        'status': status,
+        'total': sum(counts.values()),
+    })
 
 
 @manager_required
 @require_POST
 def material_add_view(request):
     form = MaterialForm(request.POST, prefix='material')
-    if form.is_valid():
-        form.save()
-        messages.success(request, f'Material "{form.instance.name}" added.')
-    else:
-        messages.error(request, _first_error(form))
-    return redirect('config')
+    if not form.is_valid():
+        return _materials_page(request, material_form=form, status=400)
+    form.save()
+    messages.success(request, f'Material "{form.instance.name}" added.')
+    return redirect('materials')
 
 
 @manager_required
@@ -323,7 +373,7 @@ def material_edit_view(request, pk):
     if request.method == 'POST' and form.is_valid():
         form.save()
         messages.success(request, f'Material "{material.name}" saved.')
-        return redirect('config')
+        return redirect('materials')
     used = material.mix_ingredients.exists() or material.prices.exists()
     return render(request, 'core/material_form.html', {'form': form, 'material': material, 'used': used})
 
@@ -342,21 +392,20 @@ def material_delete_view(request, pk):
         )
         return redirect('material_edit', pk=pk)
     messages.success(request, f'Material "{material.name}" deleted.')
-    return redirect('config')
+    return redirect('materials')
 
 
 @manager_required
 @require_POST
 def price_add_view(request):
     form = MaterialPriceForm(request.POST, prefix='price')
-    if form.is_valid():
-        price = form.save(commit=False)
-        price.created_by = request.user
-        price.save()
-        messages.success(request, f'Price for {price.material} sent for approval.')
-    else:
-        messages.error(request, _first_error(form))
-    return redirect('config')
+    if not form.is_valid():
+        return _materials_page(request, price_form=form, status=400)
+    price = form.save(commit=False)
+    price.created_by = request.user
+    price.save()
+    messages.success(request, f'Price for {price.material} sent for approval.')
+    return redirect('materials')
 
 
 @manager_required
@@ -423,7 +472,7 @@ def mix_edit_view(request, pk=None):
         with transaction.atomic():
             mix = form.save()
         messages.success(request, f'Mix "{mix.name}" saved.')
-        return redirect('config')
+        return redirect('mixes')
     return render(request, 'core/mix_form.html', {'form': form, 'mix': mix})
 
 
@@ -437,7 +486,7 @@ def mix_delete_view(request, pk):
         messages.error(request, f'"{mix.name}" is used by projects, so it can\'t be deleted. Untick Active instead.')
         return redirect('mix_edit', pk=pk)
     messages.success(request, f'Mix "{mix.name}" deleted.')
-    return redirect('config')
+    return redirect('mixes')
 
 
 def _status_steps(project):
@@ -462,11 +511,11 @@ def _not_editable(request, project):
 
 
 def _back(request):
-    """Redirect to the page the form came from (the 'next' field), or the config page."""
+    """Redirect to the page the form came from (the 'next' field), or the price history."""
     target = request.POST.get('next', '')
     if url_has_allowed_host_and_scheme(target, allowed_hosts={request.get_host()}):
         return redirect(target)
-    return redirect('config')
+    return redirect('price_history')
 
 
 def _first_error(form):

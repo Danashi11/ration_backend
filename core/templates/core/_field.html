@@ -2,7 +2,7 @@
   {% if field.widget_type == 'checkbox' %}
     <label class="check" for="{{ field.id_for_label }}">{{ field }} {{ field.label }}</label>
   {% else %}
-    <label for="{{ field.id_for_label }}">{{ field.label }}{% if not field.field.required %} <span class="muted">(optional)</span>{% endif %}</label>
+    <label for="{{ field.id_for_label }}">{{ field.label }}{% if not field.field.required and not field.field.hide_optional %} <span class="muted">(optional)</span>{% endif %}</label>
     {{ field }}
   {% endif %}
   {% if help %}<span class="field-help">{{ help }}</span>{% endif %}
